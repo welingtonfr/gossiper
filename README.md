@@ -248,8 +248,8 @@ server-side and referenced from Dart by opaque `int64` handles.
 
 - [x] Broadcast messages across the cluster
 - [x] Flutter plugin wrapper
+- [X] Pre-built blobs in CI (GitHub Actions matrix: windows/linux)
 - [ ] User data / metadata per node (memberlist `Delegate`)
-- [ ] Pre-built blobs in CI (GitHub Actions matrix: windows/linux)
 
 ---
 
