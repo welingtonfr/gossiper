@@ -13,6 +13,7 @@ jobs:
     name: Build (Linux + Windows cross)
     runs-on: ubuntu-latest
     environment: blob-build
+    if: github.actor != 'github-actions[bot]'
     steps:
       - uses: actions/checkout@v4
 
@@ -52,6 +53,7 @@ jobs:
     name: Flutter tests
     runs-on: ubuntu-latest
     environment: blob-build
+    if: github.actor != 'github-actions[bot]'
     steps:
       - uses: actions/checkout@v4
 
