@@ -4,6 +4,7 @@ name: Update native blobs
 # committing the result back to the PR branch so reviewers see updated blobs.
 on:
   pull_request:
+    types: [opened, reopened, ready_for_review]
     paths:
       - 'native/memberlist_wrapper/**'
 
@@ -56,6 +57,6 @@ jobs:
           if git diff --staged --quiet; then
             echo "Blobs unchanged — nothing to commit."
           else
-            git commit -m "chore: rebuild native blobs"
+            git commit -m "chore: rebuild native blobs [skip ci]"
             git push origin HEAD:${{ github.head_ref }}
           fi
