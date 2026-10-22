@@ -1,18 +1,14 @@
 name: Publish to pub.dev
 
-# Triggered when you push a version tag, e.g.: git tag v0.2.0 && git push --tags
 on:
   push:
     tags:
-      - 'v[0-9]*'
+      - 'v[0-9]+.[0-9]+.[0-9]+*'
 
 jobs:
-  publish:
-    name: Publish to pub.dev
+  # Run tests before publishing
+  test:
     runs-on: ubuntu-latest
-    permissions:
-      id-token: write  # required for pub.dev OIDC publishing
-
     steps:
       - uses: actions/checkout@v4
 
@@ -21,18 +17,13 @@ jobs:
           channel: stable
 
       - run: flutter pub get
-
+      - run: git checkout -- .
       - run: flutter analyze --fatal-infos
       - run: flutter test --reporter expanded
 
-      # flutter pub get may modify analysis_options.yaml; reset before pub sees it
-      - run: git checkout -- .
-
-      # Validate the package structure (dry-run)
-      - name: Dry-run publish
-        run: flutter pub publish --dry-run
-
-      # Publish — uses OIDC (no stored secrets needed; requires pub.dev OIDC setup)
-      # See: https://dart.dev/tools/pub/automated-publishing
-      - name: Publish
-        run: flutter pub publish --force
+  # Official Dart publish workflow — handles OIDC automatically
+  publish:
+    needs: test
+    permissions:
+      id-token: write
+    uses: dart-lang/setup-dart/.github/workflows/publish.yml@v1
