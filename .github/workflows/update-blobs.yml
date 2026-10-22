@@ -58,7 +58,7 @@ jobs:
             echo "changed=false" >> "$GITHUB_OUTPUT"
           else
             git commit -m "chore: rebuild native blobs"
-            git push origin "$BRANCH"
+            git push --force origin "$BRANCH"
             echo "changed=true" >> "$GITHUB_OUTPUT"
             echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
           fi
