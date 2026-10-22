@@ -247,9 +247,9 @@ server-side and referenced from Dart by opaque `int64` handles.
 ## Roadmap
 
 - [x] Broadcast messages across the cluster
-- [x] User data / metadata per node (memberlist `Delegate`)
+- [x] Flutter plugin wrapper
+- [ ] User data / metadata per node (memberlist `Delegate`)
 - [ ] Pre-built blobs in CI (GitHub Actions matrix: windows/linux)
-- [ ] Flutter plugin wrapper
 
 ---
 
