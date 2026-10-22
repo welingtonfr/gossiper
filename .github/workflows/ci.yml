@@ -12,6 +12,7 @@ jobs:
   build-linux-windows:
     name: Build (Linux + Windows cross)
     runs-on: ubuntu-latest
+    environment: blob-build
     steps:
       - uses: actions/checkout@v4
 
@@ -50,6 +51,7 @@ jobs:
   test:
     name: Flutter tests
     runs-on: ubuntu-latest
+    environment: blob-build
     steps:
       - uses: actions/checkout@v4
 
