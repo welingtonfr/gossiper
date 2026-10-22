@@ -1,7 +1,7 @@
 name: gossiper
 description: >-
   Gossip protocol for Dart and Flutter with automatic peer discovery.
-version: 0.2.0
+version: 0.3.0
 repository: https://github.com/welingtonfr/gossiper
 issue_tracker: https://github.com/welingtonfr/gossiper/issues
 license: MIT

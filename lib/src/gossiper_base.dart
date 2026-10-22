@@ -56,6 +56,9 @@ class Gossiper {
     String bindAddr = '0.0.0.0',
     int bindPort = 7946,
     String? libPath,
+    int replayMaxEntries = 500,
+    Duration replayWindow = const Duration(hours: 24),
+    String? persistPath,
   }) {
     final bindings = _loadLib(libPath);
 
@@ -75,7 +78,10 @@ class Gossiper {
         throw GossiperException('Failed to create node: ${_readErr(bindings, errPtr)}');
       }
 
-      return Gossiper._(bindings, handle);
+      final g = Gossiper._(bindings, handle);
+      g.setReplayWindow(maxEntries: replayMaxEntries, window: replayWindow);
+      if (persistPath != null) g.setPersistPath(persistPath);
+      return g;
     } finally {
       if (namePtr != nullptr) calloc.free(namePtr);
       calloc.free(addrPtr);
@@ -162,6 +168,40 @@ class Gossiper {
       };
       _eventController.add(NodeEvent(type: type, node: MemberNode.fromJson(map)));
     }
+  }
+
+  // -------------------------------------------------------------------------
+  // Replay window configuration
+  // -------------------------------------------------------------------------
+
+  /// Configures durable message log storage.
+  ///
+  /// When set, every broadcast message is appended to [path] as a JSON line.
+  /// On startup the file is loaded before the node joins the cluster, so a
+  /// PDV that restarts recovers its message history automatically — even if
+  /// every other node was also restarted in the meantime.
+  ///
+  /// Pass an empty string to disable persistence.
+  void setPersistPath(String path) {
+    final pathPtr = path.toNativeUtf8();
+    try {
+      _bindings.memberlistSetPersistPath(_handle, pathPtr.cast());
+    } finally {
+      calloc.free(pathPtr);
+    }
+  }
+
+  /// Configures the in-memory message replay log.
+  ///
+  /// When a node reconnects after being offline, memberlist automatically
+  /// calls [MergeRemoteState] and delivers messages the node missed —
+  /// up to [maxEntries] entries or [window] hours of history, whichever
+  /// is reached first. Defaults: 500 entries / 24 hours.
+  void setReplayWindow({
+    int maxEntries = 500,
+    Duration window = const Duration(hours: 24),
+  }) {
+    _bindings.memberlistSetReplayWindow(_handle, maxEntries, window.inHours);
   }
 
   // -------------------------------------------------------------------------

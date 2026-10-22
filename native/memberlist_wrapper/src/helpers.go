@@ -1,7 +1,12 @@
 package main
 
 import "C"
-import "net"
+import (
+	"crypto/rand"
+	"fmt"
+	"net"
+	"time"
+)
 
 func setErr(errOut **C.char, msg string) {
 	if errOut != nil {
@@ -45,6 +50,15 @@ func localIPs(addr string) ([]net.IP, error) {
 		return nil, net.ErrWriteToConnected
 	}
 	return ips, nil
+}
+
+func newUUID() string {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return fmt.Sprintf("%d", time.Now().UnixNano())
+	}
+	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
+		b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }
 
 func itoa(n int) string {

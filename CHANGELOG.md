@@ -1,3 +1,10 @@
+## 0.3.0
+
+- **Message replay** — when a node reconnects after being offline, it automatically receives messages it missed (up to a configurable window). Each broadcast message is assigned a UUID and timestamp; `LocalState`/`MergeRemoteState` sync the in-memory log between nodes on connect/reconnect. Deduplication by UUID prevents duplicate delivery.
+- New API: `setReplayWindow({int maxEntries, Duration window})` — configure the replay log size (default 500 entries, 24 hours).
+- New `Gossiper.create` parameters: `replayMaxEntries` and `replayWindow`.
+- New Go export: `MemberlistSetReplayWindow`.
+
 ## 0.2.0
 
 - Initial release.

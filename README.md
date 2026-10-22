@@ -180,8 +180,40 @@ node.messages().listen((msg) => print('got: $msg'));
 |---|---|---|
 | `broadcast(data)` | `void` | Queue a message to be gossiped cluster-wide |
 | `messages({pollInterval})` | `Stream<String>` | Stream of raw messages received from peers |
+| `setReplayWindow({maxEntries, window})` | `void` | Configure the replay log (default: 500 entries / 24 h) |
 
 Delivery is best-effort and unordered — use any encoding (JSON, plain text, Protobuf).
+
+#### Message replay on reconnect
+
+Every broadcast message is assigned a UUID and timestamp. The library keeps an
+in-memory log of recent messages (up to `replayMaxEntries` entries or
+`replayWindow` of history). When a node reconnects after being offline,
+memberlist automatically syncs state — the reconnecting node receives all
+messages it missed, deduplicated by UUID.
+
+```dart
+// Node A — sender (online the whole time)
+final a = Gossiper.create(
+  replayMaxEntries: 1000,
+  replayWindow: Duration(hours: 8),
+);
+a.broadcast('{"op":"price_update","sku":"ABC","price":9.99}');
+
+// Node B — PDV that went offline and came back
+final b = Gossiper.create();
+b.messages().listen((msg) {
+  // receives missed messages automatically on rejoin
+  print('replayed: $msg');
+});
+b.joinViaDiscovery(); // triggers state sync; missed messages arrive here
+```
+
+Configure the window at creation time or at any point via `setReplayWindow`:
+
+```dart
+node.setReplayWindow(maxEntries: 200, window: Duration(hours: 4));
+```
 
 ---
 
@@ -239,8 +271,10 @@ server-side and referenced from Dart by opaque `int64` handles.
 
 - [x] Broadcast messages across the cluster
 - [x] Flutter plugin wrapper
-- [X] Pre-built blobs in CI (GitHub Actions matrix: windows/linux)
+- [x] Pre-built blobs in CI (GitHub Actions matrix: windows/linux)
+- [x] Message replay on reconnect (missed-message delivery via `LocalState`/`MergeRemoteState`)
 - [ ] User data / metadata per node (memberlist `Delegate`)
+- [ ] macOS / Android / iOS support
 
 ---
 
