@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  # ──────────────────────────────────────────────────────────────────────────
+  # Build Linux .so and Windows .dll (cross-compiled) on a single ubuntu runner
+  # ──────────────────────────────────────────────────────────────────────────
+  build-linux-windows:
+    name: Build (Linux + Windows cross)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+          cache-dependency-path: native/memberlist_wrapper/go.sum
+
+      - name: Install mingw-w64 for Windows cross-compilation
+        run: sudo apt-get update -q && sudo apt-get install -y gcc-mingw-w64-x86-64
+
+      - name: Build libgossiper.so (Linux amd64)
+        working-directory: native/memberlist_wrapper
+        run: |
+          go mod tidy
+          mkdir -p ../../blobs/linux
+          CGO_ENABLED=1 GOOS=linux GOARCH=amd64 \
+            go build -buildmode=c-shared \
+            -o ../../blobs/linux/libgossiper.so .
+
+      - name: Build gossiper.dll (Windows amd64 — cross)
+        working-directory: native/memberlist_wrapper
+        run: |
+          mkdir -p ../../blobs/windows
+          CGO_ENABLED=1 GOOS=windows GOARCH=amd64 \
+            CC=x86_64-w64-mingw32-gcc \
+            go build -buildmode=c-shared \
+            -o ../../blobs/windows/gossiper.dll .
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: blobs-linux-windows
+          path: blobs/
+          retention-days: 1
+
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Run Dart unit tests (no DLL needed — tests use fake bindings)
+  # ──────────────────────────────────────────────────────────────────────────
+  test:
+    name: Dart tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dart-lang/setup-dart@v1
+        with:
+          sdk: stable
+
+      - run: dart pub get
+
+      - run: dart analyze --fatal-infos
+
+      - run: dart test --reporter expanded
