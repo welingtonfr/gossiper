@@ -1,8 +1,6 @@
 name: gossiper
 description: >-
-  Gossip protocol for Dart and Flutter via hashicorp/memberlist (Go) compiled
-  as a native shared library and loaded with dart:ffi. Includes automatic peer
-  discovery via multicast DNS (mDNS).
+  Gossip protocol for Dart and Flutter with automatic peer discovery.
 version: 0.2.0
 repository: https://github.com/welingtonfr/gossiper
 issue_tracker: https://github.com/welingtonfr/gossiper/issues
