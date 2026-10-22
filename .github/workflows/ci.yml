@@ -41,11 +41,7 @@ jobs:
             go build -buildmode=c-shared \
             -o ../../blobs/windows/gossiper.dll .
 
-      - uses: actions/upload-artifact@v4
-        with:
-          name: blobs-linux-windows
-          path: blobs/
-          retention-days: 1
+      # Build-only check — blobs are committed to git via update-blobs.yml
 
 
   # ──────────────────────────────────────────────────────────────────────────

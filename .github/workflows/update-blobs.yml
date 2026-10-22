@@ -1,0 +1,56 @@
+name: Update native blobs
+
+# Rebuilds and commits blobs/ whenever the Go wrapper changes.
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'native/memberlist_wrapper/**'
+
+jobs:
+  build-and-commit:
+    name: Build Linux + Windows and commit
+    runs-on: ubuntu-latest
+    # Skip when triggered by the bot's own commit to avoid infinite loops
+    if: github.actor != 'github-actions[bot]'
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Need write access to push the commit back
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+          cache-dependency-path: native/memberlist_wrapper/go.sum
+
+      - name: Install mingw-w64 for Windows cross-compilation
+        run: sudo apt-get update -q && sudo apt-get install -y gcc-mingw-w64-x86-64
+
+      - name: Build libgossiper.so (Linux amd64)
+        working-directory: native/memberlist_wrapper
+        run: |
+          go mod tidy
+          mkdir -p ../../blobs/linux
+          CGO_ENABLED=1 GOOS=linux GOARCH=amd64 \
+            go build -buildmode=c-shared \
+            -o ../../blobs/linux/libgossiper.so .
+
+      - name: Build gossiper.dll (Windows amd64 — cross)
+        working-directory: native/memberlist_wrapper
+        run: |
+          mkdir -p ../../blobs/windows
+          CGO_ENABLED=1 GOOS=windows GOARCH=amd64 \
+            CC=x86_64-w64-mingw32-gcc \
+            go build -buildmode=c-shared \
+            -o ../../blobs/windows/gossiper.dll .
+
+      - name: Commit updated blobs
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add blobs/
+          git diff --staged --quiet && echo "blobs unchanged" || \
+            git commit -m "chore: rebuild native blobs"
+          git push

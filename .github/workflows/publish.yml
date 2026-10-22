@@ -7,53 +7,8 @@ on:
       - 'v[0-9]*'
 
 jobs:
-  # ──────────────────────────────────────────────────────────────────────────
-  # 1. Build native blobs — same as CI but all three platforms
-  # ──────────────────────────────────────────────────────────────────────────
-  build-linux-windows:
-    name: Build (Linux + Windows cross)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-go@v5
-        with:
-          go-version: '1.21'
-          cache-dependency-path: native/memberlist_wrapper/go.sum
-
-      - name: Install mingw-w64
-        run: sudo apt-get update -q && sudo apt-get install -y gcc-mingw-w64-x86-64
-
-      - name: Build Linux blob
-        working-directory: native/memberlist_wrapper
-        run: |
-          go mod tidy
-          mkdir -p ../../blobs/linux
-          CGO_ENABLED=1 GOOS=linux GOARCH=amd64 \
-            go build -buildmode=c-shared \
-            -o ../../blobs/linux/libgossiper.so .
-
-      - name: Build Windows blob (cross)
-        working-directory: native/memberlist_wrapper
-        run: |
-          mkdir -p ../../blobs/windows
-          CGO_ENABLED=1 GOOS=windows GOARCH=amd64 \
-            CC=x86_64-w64-mingw32-gcc \
-            go build -buildmode=c-shared \
-            -o ../../blobs/windows/gossiper.dll .
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: blobs-linux-windows
-          path: blobs/
-
-  # ──────────────────────────────────────────────────────────────────────────
-  # 2. Test + Publish
-  #    Assembles all blobs and publishes the Dart package to pub.dev
-  # ──────────────────────────────────────────────────────────────────────────
   publish:
     name: Publish to pub.dev
-    needs: [build-linux-windows]
     runs-on: ubuntu-latest
     permissions:
       id-token: write  # required for pub.dev OIDC publishing
@@ -61,19 +16,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Download all blobs into blobs/ so they ship with the package
-      - uses: actions/download-artifact@v4
-        with:
-          name: blobs-linux-windows
-          path: blobs/
-
       - uses: subosito/flutter-action@v2
         with:
           channel: stable
 
       - run: flutter pub get
 
-      # Sanity check before publishing
       - run: flutter analyze --fatal-infos
       - run: flutter test --reporter expanded
 

@@ -6,10 +6,6 @@
 # https://dart.dev/tools/pub/private-files#pubspec-lock.
 pubspec.lock
 
-# Pre-built native binaries — built by CI (see .github/workflows/), not committed.
-# dart pub publish includes them because they are built before publishing.
-blobs/
-
 build/
 
 # Go build artifacts
