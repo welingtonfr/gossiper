@@ -56,6 +56,6 @@ jobs:
           if git diff --staged --quiet; then
             echo "Blobs unchanged — nothing to commit."
           else
-            git commit -m "chore: rebuild native blobs"
+            git commit -m "chore: rebuild native blobs [skip ci]"
             git push origin HEAD:${{ github.head_ref }}
           fi
