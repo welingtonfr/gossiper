@@ -20,6 +20,6 @@ New-Item -ItemType Directory -Force $OutDir | Out-Null
 
 go build -buildmode=c-shared `
     -o "$OutDir\gossiper.dll" `
-    .
+    ./src
 
 Write-Host "Done. Output: $OutDir\gossiper.dll"
