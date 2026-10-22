@@ -1,6 +1,6 @@
 name: Update native blobs
 
-# Rebuilds and commits blobs/ whenever the Go wrapper changes.
+# Rebuilds blobs/ whenever the Go wrapper changes and opens a PR.
 on:
   push:
     branches: [master]
@@ -8,17 +8,17 @@ on:
       - 'native/memberlist_wrapper/**'
 
 jobs:
-  build-and-commit:
-    name: Build Linux + Windows and commit
+  build-and-pr:
+    name: Build Linux + Windows and open PR
     runs-on: ubuntu-latest
-    # Skip when triggered by the bot's own commit to avoid infinite loops
+    permissions:
+      contents: write       # push the new branch
+      pull-requests: write  # open the PR
+    # Skip when triggered by a bot commit (e.g. merge of a previous blobs PR)
     if: github.actor != 'github-actions[bot]'
 
     steps:
       - uses: actions/checkout@v4
-        with:
-          # Need write access to push the commit back
-          token: ${{ secrets.GITHUB_TOKEN }}
 
       - uses: actions/setup-go@v5
         with:
@@ -46,11 +46,30 @@ jobs:
             go build -buildmode=c-shared \
             -o ../../blobs/windows/gossiper.dll .
 
-      - name: Commit updated blobs
+      - name: Commit blobs to a new branch
+        id: commit
         run: |
+          BRANCH="chore/update-blobs-${GITHUB_SHA::8}"
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$BRANCH"
           git add blobs/
-          git diff --staged --quiet && echo "blobs unchanged" || \
+          if git diff --staged --quiet; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
             git commit -m "chore: rebuild native blobs"
-          git push
+            git push origin "$BRANCH"
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Open pull request
+        if: steps.commit.outputs.changed == 'true'
+        run: |
+          gh pr create \
+            --title "chore: rebuild native blobs" \
+            --body "Automated rebuild of \`blobs/\` triggered by changes to \`native/memberlist_wrapper/\` in ${{ github.sha }}." \
+            --base master \
+            --head "${{ steps.commit.outputs.branch }}"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
