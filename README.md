@@ -45,15 +45,6 @@ This is a **Flutter FFI plugin**. Flutter's build system automatically bundles
 the correct native library (`.dll` on Windows, `.so` on Linux) alongside your
 app — no manual copying required.
 
-For plain Dart CLI projects, copy the blob next to your executable or pass
-`libPath:` to `Gossiper.create`:
-
-```
-blobs/
-├── windows/gossiper.dll
-└── linux/libgossiper.so
-```
-
 ---
 
 ## Quick start
