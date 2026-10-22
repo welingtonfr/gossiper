@@ -1,0 +1,7 @@
+# Dev tooling — not useful to package consumers
+CLAUDE.md
+build/
+.idea/
+.github/
+native/memberlist_wrapper/build.ps1
+native/memberlist_wrapper/Makefile

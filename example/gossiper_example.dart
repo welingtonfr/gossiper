@@ -2,53 +2,58 @@ import 'dart:io';
 import 'package:gossiper/gossiper.dart';
 
 void main(List<String> args) async {
-  // Optional: pass explicit seed addresses as arguments.
-  // Without them the node uses mDNS to discover peers automatically.
   final explicitSeeds = args.toList();
 
-  final gossiper = Gossiper.create(
+  final node = Gossiper.create(
     name: 'node-$pid',
     bindAddr: '0.0.0.0',
     bindPort: 7946,
-    // libPath: r'blobs\windows\gossiper.dll', // override if needed
   );
 
-  print('Local node: ${gossiper.localNode()}');
+  stdout.writeln('Local node: ${node.localNode()}');
 
-  // Subscribe to join/leave/update events before doing anything else
-  gossiper.events().listen((event) {
-    print('[event] ${event.type.name.padRight(6)} ${event.node}');
+  // Membership events
+  node.events().listen((e) {
+    stdout.writeln('[event] ${e.type.name.padRight(6)} ${e.node}');
   });
 
-  // Advertise ourselves so other nodes can find us automatically
-  gossiper.startDiscovery(serviceName: '_gossiper._tcp');
-  print('mDNS advertisement started.');
+  // Broadcast messages received from peers
+  node.messages().listen((msg) {
+    stdout.writeln('[msg]   $msg');
+  });
+
+  // Advertise on LAN so other nodes can discover this one
+  node.startDiscovery(serviceName: '_gossiper._tcp');
+  stdout.writeln('mDNS advertisement started.');
 
   if (explicitSeeds.isNotEmpty) {
-    final n = gossiper.join(explicitSeeds);
-    print('Joined via explicit seeds — contacted $n node(s).');
+    final n = node.join(explicitSeeds);
+    stdout.writeln('Joined via explicit seeds — contacted $n node(s).');
   } else {
-    // Auto-discover peers on the LAN and join them
-    print('Scanning for peers via mDNS (2 s)…');
-    final contacted = gossiper.joinViaDiscovery(
+    stdout.writeln('Scanning for peers via mDNS (2 s)…');
+    final contacted = node.joinViaDiscovery(
       serviceName: '_gossiper._tcp',
       discoveryTimeout: const Duration(seconds: 2),
     );
     if (contacted > 0) {
-      print('Joined cluster via mDNS — contacted $contacted node(s).');
+      stdout.writeln('Joined cluster via mDNS — contacted $contacted node(s).');
     } else {
-      print('No peers found — running as bootstrap node, waiting for others.');
+      stdout.writeln('No peers found — running as bootstrap node.');
     }
   }
+
+  // Broadcast a message to every peer in the cluster
+  node.broadcast('{"from":"node-$pid","hello":"world"}');
+  stdout.writeln('Broadcast sent.');
 
   // Print member list every 3 seconds
   for (var i = 0; i < 5; i++) {
     await Future.delayed(const Duration(seconds: 3));
-    final members = gossiper.members();
+    final members = node.members();
     final names = members.map((m) => m.name).join(', ');
-    print('Members (${members.length}): $names');
+    stdout.writeln('Members (${members.length}): $names');
   }
 
-  gossiper.leave();
-  gossiper.dispose();
+  node.leave();
+  node.dispose();
 }
