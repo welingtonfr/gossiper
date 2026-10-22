@@ -21,6 +21,20 @@ extern const char *_GoStringPtr(_GoString_ s);
 /* Start of preamble from import "C" comments.  */
 
 
+#line 3 "exports_mdns.go"
+
+#include <stdlib.h>
+#include <stdint.h>
+
+#line 1 "cgo-generated-wrapper"
+
+#line 3 "exports_memberlist.go"
+
+#include <stdlib.h>
+#include <stdint.h>
+
+#line 1 "cgo-generated-wrapper"
+
 #line 3 "wrapper.go"
 
 #include <stdlib.h>
@@ -88,6 +102,9 @@ typedef struct { void *data; GoInt len; GoInt cap; } GoSlice;
 extern "C" {
 #endif
 
+extern int MemberlistStartMDNS(int64_t handle, char* serviceNameC, char** errOut);
+extern void MemberlistStopMDNS(int64_t handle);
+extern char* MemberlistDiscoverMDNS(char* serviceNameC, int timeoutMs);
 extern int64_t MemberlistCreate(char* nameC, char* bindAddrC, int bindPort, char** errOut);
 extern int MemberlistJoin(int64_t handle, char* addrsJson, char** errOut);
 extern char* MemberlistMembers(int64_t handle);
@@ -97,10 +114,9 @@ extern char* MemberlistPollEvents(int64_t handle);
 extern int MemberlistLeave(int64_t handle, int timeoutMs, char** errOut);
 extern void MemberlistDestroy(int64_t handle);
 extern int MemberlistBroadcast(int64_t handle, char* dataC, char** errOut);
+extern void MemberlistSetReplayWindow(int64_t handle, int maxEntries, int windowHours);
+extern void MemberlistSetPersistPath(int64_t handle, char* pathC);
 extern char* MemberlistPollMessages(int64_t handle);
-extern int MemberlistStartMDNS(int64_t handle, char* serviceNameC, char** errOut);
-extern void MemberlistStopMDNS(int64_t handle);
-extern char* MemberlistDiscoverMDNS(char* serviceNameC, int timeoutMs);
 extern void FreeString(char* s);
 
 #ifdef __cplusplus
