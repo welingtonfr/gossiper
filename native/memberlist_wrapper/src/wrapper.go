@@ -8,6 +8,7 @@ import "C"
 import (
 	"encoding/json"
 	"net"
+	"sort"
 	"sync"
 	"time"
 	"unsafe"
@@ -85,16 +86,30 @@ type nodeEvent struct {
 	Port int    `json:"port"`
 }
 
+// logEntry is the envelope wrapping every broadcast message.
+// It travels over gossip so peers can dedup and replay on reconnect.
+type logEntry struct {
+	ID   string `json:"id"`
+	Data string `json:"data"`
+	At   int64  `json:"at"` // unix milliseconds
+}
+
 type gossipDelegate struct {
 	mu         sync.Mutex
 	events     []nodeEvent
 	received   []string
 	broadcasts *memberlist.TransmitLimitedQueue
-	ml         *memberlist.Memberlist // wired after Create
+	ml         *memberlist.Memberlist
+	msgLog     []logEntry
+	maxLog     int
+	logWindow  time.Duration
 }
 
 func newDelegate() *gossipDelegate {
-	d := &gossipDelegate{}
+	d := &gossipDelegate{
+		maxLog:    500,
+		logWindow: 24 * time.Hour,
+	}
 	d.broadcasts = &memberlist.TransmitLimitedQueue{
 		NumNodes: func() int {
 			if d.ml == nil {
@@ -105,6 +120,20 @@ func newDelegate() *gossipDelegate {
 		RetransmitMult: 3,
 	}
 	return d
+}
+
+// pruneLog removes entries older than logWindow or beyond maxLog cap.
+// Must be called with d.mu held.
+func (d *gossipDelegate) pruneLog() {
+	cutoff := time.Now().Add(-d.logWindow).UnixMilli()
+	start := 0
+	for start < len(d.msgLog) && d.msgLog[start].At < cutoff {
+		start++
+	}
+	d.msgLog = d.msgLog[start:]
+	if len(d.msgLog) > d.maxLog {
+		d.msgLog = d.msgLog[len(d.msgLog)-d.maxLog:]
+	}
 }
 
 // memberlist.EventDelegate
@@ -133,19 +162,72 @@ func (d *gossipDelegate) NotifyMsg(b []byte) {
 	if len(b) == 0 {
 		return
 	}
-	msg := make([]byte, len(b))
-	copy(msg, b)
+	var entry logEntry
+	if err := json.Unmarshal(b, &entry); err != nil || entry.ID == "" {
+		// plain string — not from gossiper broadcast, deliver as-is
+		d.mu.Lock()
+		d.received = append(d.received, string(b))
+		d.mu.Unlock()
+		return
+	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	d.received = append(d.received, string(msg))
+	for _, e := range d.msgLog {
+		if e.ID == entry.ID {
+			return // already seen — gossip retransmit, discard
+		}
+	}
+	d.msgLog = append(d.msgLog, entry)
+	d.received = append(d.received, entry.Data)
+	d.pruneLog()
 }
 
 func (d *gossipDelegate) GetBroadcasts(overhead, limit int) [][]byte {
 	return d.broadcasts.GetBroadcasts(overhead, limit)
 }
 
-func (d *gossipDelegate) LocalState(join bool) []byte            { return nil }
-func (d *gossipDelegate) MergeRemoteState(buf []byte, join bool) {}
+// LocalState is called by memberlist to get a full snapshot of this node's
+// message log, which is pushed to peers during joins and periodic syncs.
+func (d *gossipDelegate) LocalState(join bool) []byte {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.pruneLog()
+	if len(d.msgLog) == 0 {
+		return nil
+	}
+	b, _ := json.Marshal(d.msgLog)
+	return b
+}
+
+// MergeRemoteState is called when a peer's LocalState arrives.
+// New entries (not already in our log) are added and delivered to the app,
+// giving a PDV that was offline a chance to catch up on missed messages.
+func (d *gossipDelegate) MergeRemoteState(buf []byte, join bool) {
+	if len(buf) == 0 {
+		return
+	}
+	var incoming []logEntry
+	if err := json.Unmarshal(buf, &incoming); err != nil {
+		return
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	known := make(map[string]bool, len(d.msgLog))
+	for _, e := range d.msgLog {
+		known[e.ID] = true
+	}
+	for _, e := range incoming {
+		if !known[e.ID] {
+			d.msgLog = append(d.msgLog, e)
+			d.received = append(d.received, e.Data)
+			known[e.ID] = true
+		}
+	}
+	sort.Slice(d.msgLog, func(i, j int) bool {
+		return d.msgLog[i].At < d.msgLog[j].At
+	})
+	d.pruneLog()
+}
 
 // drain helpers
 
@@ -349,8 +431,39 @@ func MemberlistBroadcast(handle C.int64_t, dataC *C.char, errOut **C.char) C.int
 		setErr(errOut, "invalid handle")
 		return -1
 	}
-	d.broadcasts.QueueBroadcast(&simpleBroadcast{[]byte(C.GoString(dataC))})
+	entry := logEntry{
+		ID:   newUUID(),
+		Data: C.GoString(dataC),
+		At:   time.Now().UnixMilli(),
+	}
+	b, _ := json.Marshal(entry)
+	d.mu.Lock()
+	d.msgLog = append(d.msgLog, entry)
+	d.pruneLog()
+	d.mu.Unlock()
+	d.broadcasts.QueueBroadcast(&simpleBroadcast{b})
 	return 0
+}
+
+// MemberlistSetReplayWindow configures the in-memory replay log.
+// maxEntries: maximum number of messages to keep (0 = keep current setting).
+// windowHours: how many hours of history to retain (0 = keep current setting).
+// Defaults are 500 entries / 24 hours.
+//
+//export MemberlistSetReplayWindow
+func MemberlistSetReplayWindow(handle C.int64_t, maxEntries C.int, windowHours C.int) {
+	d := lookupDelegate(handle)
+	if d == nil {
+		return
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if maxEntries > 0 {
+		d.maxLog = int(maxEntries)
+	}
+	if windowHours > 0 {
+		d.logWindow = time.Duration(windowHours) * time.Hour
+	}
 }
 
 // MemberlistPollMessages drains messages received from other cluster nodes.

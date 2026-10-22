@@ -85,6 +85,7 @@ GossiperBindings _fakeBindings({
       messagesQueue.clear();
       return _cstr(jsonEncode(batch));
     },
+    memberlistSetReplayWindow: (h, maxEntries, windowHours) {},
     freeString: (ptr) => calloc.free(ptr),
   );
 }
@@ -278,6 +279,46 @@ void main() {
       expect(events, hasLength(1));
       expect(msgs, hasLength(1));
       expect(msgs.first, 'ping');
+    });
+  });
+
+  group('setReplayWindow', () {
+    test('completes without error with default params', () {
+      final g = Gossiper.withBindings(_fakeBindings());
+      expect(() => g.setReplayWindow(), returnsNormally);
+      g.dispose();
+    });
+
+    test('create applies replayMaxEntries and replayWindow', () {
+      var capturedEntries = 0;
+      var capturedHours = 0;
+      final bindings = _fakeBindings();
+      // override setReplayWindow to capture what was passed
+      final b = GossiperBindings.fake(
+        memberlistCreate: bindings.memberlistCreate,
+        memberlistJoin: bindings.memberlistJoin,
+        memberlistMembers: bindings.memberlistMembers,
+        memberlistLocalNode: bindings.memberlistLocalNode,
+        memberlistNumMembers: bindings.memberlistNumMembers,
+        memberlistPollEvents: bindings.memberlistPollEvents,
+        memberlistLeave: bindings.memberlistLeave,
+        memberlistDestroy: bindings.memberlistDestroy,
+        memberlistStartMDNS: bindings.memberlistStartMDNS,
+        memberlistStopMDNS: bindings.memberlistStopMDNS,
+        memberlistDiscoverMDNS: bindings.memberlistDiscoverMDNS,
+        memberlistBroadcast: bindings.memberlistBroadcast,
+        memberlistPollMessages: bindings.memberlistPollMessages,
+        memberlistSetReplayWindow: (h, max, hours) {
+          capturedEntries = max;
+          capturedHours = hours;
+        },
+        freeString: bindings.freeString,
+      );
+      final g = Gossiper.withBindings(b);
+      g.setReplayWindow(maxEntries: 200, window: const Duration(hours: 12));
+      expect(capturedEntries, equals(200));
+      expect(capturedHours, equals(12));
+      g.dispose();
     });
   });
 

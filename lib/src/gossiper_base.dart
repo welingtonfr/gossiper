@@ -56,6 +56,8 @@ class Gossiper {
     String bindAddr = '0.0.0.0',
     int bindPort = 7946,
     String? libPath,
+    int replayMaxEntries = 500,
+    Duration replayWindow = const Duration(hours: 24),
   }) {
     final bindings = _loadLib(libPath);
 
@@ -75,7 +77,9 @@ class Gossiper {
         throw GossiperException('Failed to create node: ${_readErr(bindings, errPtr)}');
       }
 
-      return Gossiper._(bindings, handle);
+      final g = Gossiper._(bindings, handle);
+      g.setReplayWindow(maxEntries: replayMaxEntries, window: replayWindow);
+      return g;
     } finally {
       if (namePtr != nullptr) calloc.free(namePtr);
       calloc.free(addrPtr);
@@ -162,6 +166,23 @@ class Gossiper {
       };
       _eventController.add(NodeEvent(type: type, node: MemberNode.fromJson(map)));
     }
+  }
+
+  // -------------------------------------------------------------------------
+  // Replay window configuration
+  // -------------------------------------------------------------------------
+
+  /// Configures the in-memory message replay log.
+  ///
+  /// When a node reconnects after being offline, memberlist automatically
+  /// calls [MergeRemoteState] and delivers messages the node missed —
+  /// up to [maxEntries] entries or [window] hours of history, whichever
+  /// is reached first. Defaults: 500 entries / 24 hours.
+  void setReplayWindow({
+    int maxEntries = 500,
+    Duration window = const Duration(hours: 24),
+  }) {
+    _bindings.memberlistSetReplayWindow(_handle, maxEntries, window.inHours);
   }
 
   // -------------------------------------------------------------------------
