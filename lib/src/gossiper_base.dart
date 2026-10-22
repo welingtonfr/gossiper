@@ -40,7 +40,6 @@ class Gossiper {
 
   static String _defaultLibPath() {
     if (Platform.isWindows) return 'gossiper.dll';
-    if (Platform.isMacOS) return 'libgossiper.dylib';
     return 'libgossiper.so';
   }
 

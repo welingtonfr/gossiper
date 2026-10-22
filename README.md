@@ -17,7 +17,7 @@ list, no service registry, no config files.
 - **Gossip protocol** — eventual consistency, fault-tolerant cluster membership
 - **Auto-discovery** — nodes find each other on the same LAN via mDNS with no configuration
 - **Event stream** — subscribe to join / leave / update events as a Dart `Stream`
-- **Cross-platform** — Windows (`.dll`), Linux (`.so`), macOS (`.dylib`)
+- **Cross-platform** — Windows (`.dll`), Linux (`.so`)
 - **Pure Dart API** — no platform channels, no code generation
 
 ---
@@ -47,8 +47,7 @@ Copy the correct file for your platform next to your executable, or pass
 ```
 blobs/
 ├── windows/gossiper.dll
-├── linux/libgossiper.so
-└── macos/libgossiper.dylib
+└── linux/libgossiper.so
 ```
 
 ---
@@ -179,7 +178,6 @@ rebuild if you modify the Go wrapper in `native/memberlist_wrapper/`.
 |---|---|
 | Windows | Go 1.21+, [tdm-gcc](https://jmeubank.github.io/tdm-gcc/) or MSYS2 mingw-w64 |
 | Linux | Go 1.21+, gcc |
-| macOS | Go 1.21+, `xcode-select --install` |
 
 **Windows**
 
@@ -189,11 +187,11 @@ go mod tidy
 .\build.ps1
 ```
 
-**Linux / macOS**
+**Linux**
 
 ```bash
 cd native/memberlist_wrapper
-make linux   # or: make macos
+make linux
 ```
 
 The compiled library lands in `blobs/<platform>/`.
@@ -206,7 +204,7 @@ The compiled library lands in `blobs/<platform>/`.
 Dart API (lib/)
    └── dart:ffi
           │
-   gossiper.dll / libgossiper.so / libgossiper.dylib
+   gossiper.dll / libgossiper.so
           │
    Go wrapper (native/memberlist_wrapper/wrapper.go)
      ├── hashicorp/memberlist   — gossip protocol
