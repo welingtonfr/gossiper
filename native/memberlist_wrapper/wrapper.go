@@ -127,8 +127,6 @@ func (d *gossipDelegate) NotifyUpdate(n *memberlist.Node) {
 	d.events = append(d.events, nodeEvent{EventUpdate, n.Name, n.Addr.String(), int(n.Port)})
 }
 
-// memberlist.Delegate
-
 func (d *gossipDelegate) NodeMeta(limit int) []byte { return nil }
 
 func (d *gossipDelegate) NotifyMsg(b []byte) {
