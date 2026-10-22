@@ -10,11 +10,8 @@ import 'package:test/test.dart';
 // Fake bindings helpers
 // ---------------------------------------------------------------------------
 
-// Allocates a C string via calloc — Gossiper will free it with freeString,
-// which in the fake calls calloc.free (the same allocator).
 Pointer<Utf8> _cstr(String s) => s.toNativeUtf8(allocator: calloc);
 
-// A minimal set of fake functions that return plausible JSON responses.
 GossiperBindings _fakeBindings({
   int handle = 1,
   String localName = 'test-node',
@@ -22,13 +19,16 @@ GossiperBindings _fakeBindings({
   int localPort = 7946,
   List<Map<String, dynamic>> members = const [],
   List<Map<String, dynamic>> pendingEvents = const [],
+  List<String> pendingMessages = const [],
   List<String> discoveredPeers = const [],
   int joinResult = 1,
   bool leaveError = false,
   bool createError = false,
   bool mdnsStartError = false,
+  bool broadcastError = false,
 }) {
   final eventsQueue = [...pendingEvents];
+  final messagesQueue = [...pendingMessages];
 
   return GossiperBindings.fake(
     memberlistCreate: (name, bindAddr, bindPort, errOut) {
@@ -72,6 +72,19 @@ GossiperBindings _fakeBindings({
     },
     memberlistStopMDNS: (h) {},
     memberlistDiscoverMDNS: (svc, timeoutMs) => _cstr(jsonEncode(discoveredPeers)),
+    memberlistBroadcast: (h, data, errOut) {
+      if (broadcastError) {
+        if (errOut != nullptr) errOut.value = _cstr('simulated broadcast error');
+        return -1;
+      }
+      return 0;
+    },
+    memberlistPollMessages: (h) {
+      if (messagesQueue.isEmpty) return _cstr('[]');
+      final batch = [...messagesQueue];
+      messagesQueue.clear();
+      return _cstr(jsonEncode(batch));
+    },
     freeString: (ptr) => calloc.free(ptr),
   );
 }
@@ -89,12 +102,6 @@ void main() {
     });
 
     test('throws GossiperException when native create fails', () {
-      expect(
-        () => Gossiper.withBindings(_fakeBindings(createError: true)),
-        returnsNormally, // withBindings bypasses create — test via fake directly
-      );
-
-      // Verify the exception path via a binding that returns -1
       final bindings = _fakeBindings(createError: true);
       final errPtr = calloc<Pointer<Utf8>>();
       final result = bindings.memberlistCreate(nullptr, nullptr, 0, errPtr);
@@ -135,9 +142,7 @@ void main() {
 
     test('numMembers matches members list length', () {
       final g = Gossiper.withBindings(_fakeBindings(
-        members: [
-          {'name': 'node-2', 'addr': '127.0.0.1', 'port': 7947},
-        ],
+        members: [{'name': 'node-2', 'addr': '127.0.0.1', 'port': 7947}],
       ));
       expect(g.numMembers(), equals(g.members().length));
       g.dispose();
@@ -208,6 +213,74 @@ void main() {
     });
   });
 
+  group('broadcast', () {
+    test('succeeds without error', () {
+      final g = Gossiper.withBindings(_fakeBindings());
+      expect(() => g.broadcast('{"op":"ping"}'), returnsNormally);
+      g.dispose();
+    });
+
+    test('throws GossiperException on error', () {
+      final g = Gossiper.withBindings(_fakeBindings(broadcastError: true));
+      expect(() => g.broadcast('hello'), throwsA(isA<GossiperException>()));
+      g.dispose();
+    });
+  });
+
+  group('messages', () {
+    test('emits messages queued in the fake', () async {
+      final g = Gossiper.withBindings(_fakeBindings(
+        pendingMessages: ['{"op":"set","key":"x","val":1}', 'hello'],
+      ));
+
+      final received = <String>[];
+      final sub = g.messages(pollInterval: const Duration(milliseconds: 50)).listen(received.add);
+
+      await Future.delayed(const Duration(milliseconds: 200));
+      await sub.cancel();
+      g.dispose();
+
+      expect(received, hasLength(2));
+      expect(received[0], '{"op":"set","key":"x","val":1}');
+      expect(received[1], 'hello');
+    });
+
+    test('emits nothing when no messages pending', () async {
+      final g = Gossiper.withBindings(_fakeBindings());
+      final received = <String>[];
+      final sub = g.messages(pollInterval: const Duration(milliseconds: 50)).listen(received.add);
+
+      await Future.delayed(const Duration(milliseconds: 150));
+      await sub.cancel();
+      g.dispose();
+
+      expect(received, isEmpty);
+    });
+
+    test('events and messages can both be active simultaneously', () async {
+      final g = Gossiper.withBindings(_fakeBindings(
+        pendingEvents: [
+          {'type': 0, 'name': 'peer-1', 'addr': '10.0.0.2', 'port': 7946},
+        ],
+        pendingMessages: ['ping'],
+      ));
+
+      final events = <NodeEvent>[];
+      final msgs = <String>[];
+      final s1 = g.events(pollInterval: const Duration(milliseconds: 50)).listen(events.add);
+      final s2 = g.messages(pollInterval: const Duration(milliseconds: 50)).listen(msgs.add);
+
+      await Future.delayed(const Duration(milliseconds: 200));
+      await s1.cancel();
+      await s2.cancel();
+      g.dispose();
+
+      expect(events, hasLength(1));
+      expect(msgs, hasLength(1));
+      expect(msgs.first, 'ping');
+    });
+  });
+
   group('mDNS', () {
     test('startDiscovery succeeds', () {
       final g = Gossiper.withBindings(_fakeBindings());
@@ -225,8 +298,7 @@ void main() {
       final g = Gossiper.withBindings(_fakeBindings(
         discoveredPeers: ['192.168.1.5:7946', '192.168.1.6:7946'],
       ));
-      final peers = g.discoverPeers();
-      expect(peers, equals(['192.168.1.5:7946', '192.168.1.6:7946']));
+      expect(g.discoverPeers(), equals(['192.168.1.5:7946', '192.168.1.6:7946']));
       g.dispose();
     });
 

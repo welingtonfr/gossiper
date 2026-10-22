@@ -84,6 +84,24 @@ typedef MemberlistDiscoverMDNSDart = Pointer<Utf8> Function(
 );
 
 // ---------------------------------------------------------------------------
+// Native function typedefs — broadcast messaging
+// ---------------------------------------------------------------------------
+
+typedef _MemberlistBroadcastNative = Int32 Function(
+  Int64 handle,
+  Pointer<Utf8> data,
+  Pointer<Pointer<Utf8>> errOut,
+);
+typedef MemberlistBroadcastDart = int Function(
+  int handle,
+  Pointer<Utf8> data,
+  Pointer<Pointer<Utf8>> errOut,
+);
+
+typedef _MemberlistPollMessagesNative = Pointer<Utf8> Function(Int64 handle);
+typedef MemberlistPollMessagesDart = Pointer<Utf8> Function(int handle);
+
+// ---------------------------------------------------------------------------
 // FreeString
 // ---------------------------------------------------------------------------
 
@@ -106,6 +124,8 @@ class GossiperBindings {
   final MemberlistStartMDNSDart memberlistStartMDNS;
   final MemberlistStopMDNSDart memberlistStopMDNS;
   final MemberlistDiscoverMDNSDart memberlistDiscoverMDNS;
+  final MemberlistBroadcastDart memberlistBroadcast;
+  final MemberlistPollMessagesDart memberlistPollMessages;
   final FreeStringDart freeString;
 
   GossiperBindings._({
@@ -120,6 +140,8 @@ class GossiperBindings {
     required this.memberlistStartMDNS,
     required this.memberlistStopMDNS,
     required this.memberlistDiscoverMDNS,
+    required this.memberlistBroadcast,
+    required this.memberlistPollMessages,
     required this.freeString,
   });
 
@@ -150,6 +172,11 @@ class GossiperBindings {
       memberlistDiscoverMDNS: lib
           .lookup<NativeFunction<_MemberlistDiscoverMDNSNative>>('MemberlistDiscoverMDNS')
           .asFunction(),
+      memberlistBroadcast:
+          lib.lookup<NativeFunction<_MemberlistBroadcastNative>>('MemberlistBroadcast').asFunction(),
+      memberlistPollMessages: lib
+          .lookup<NativeFunction<_MemberlistPollMessagesNative>>('MemberlistPollMessages')
+          .asFunction(),
       freeString: lib.lookup<NativeFunction<_FreeStringNative>>('FreeString').asFunction(),
     );
   }
@@ -167,6 +194,8 @@ class GossiperBindings {
     required MemberlistStartMDNSDart memberlistStartMDNS,
     required MemberlistStopMDNSDart memberlistStopMDNS,
     required MemberlistDiscoverMDNSDart memberlistDiscoverMDNS,
+    required MemberlistBroadcastDart memberlistBroadcast,
+    required MemberlistPollMessagesDart memberlistPollMessages,
     required FreeStringDart freeString,
   }) =>
       GossiperBindings._(
@@ -181,6 +210,8 @@ class GossiperBindings {
         memberlistStartMDNS: memberlistStartMDNS,
         memberlistStopMDNS: memberlistStopMDNS,
         memberlistDiscoverMDNS: memberlistDiscoverMDNS,
+        memberlistBroadcast: memberlistBroadcast,
+        memberlistPollMessages: memberlistPollMessages,
         freeString: freeString,
       );
 }

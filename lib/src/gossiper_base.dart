@@ -25,7 +25,9 @@ class Gossiper {
   final GossiperBindings _bindings;
   final int _handle;
   Timer? _pollTimer;
+  Timer? _messagesPollTimer;
   final _eventController = StreamController<NodeEvent>.broadcast();
+  final _messagesController = StreamController<String>.broadcast();
 
   Gossiper._(this._bindings, this._handle);
 
@@ -163,6 +165,49 @@ class Gossiper {
   }
 
   // -------------------------------------------------------------------------
+  // Broadcast messaging
+  // -------------------------------------------------------------------------
+
+  /// Queues [data] to be gossiped to every node in the cluster.
+  ///
+  /// The message is propagated via memberlist's gossip broadcast mechanism.
+  /// Delivery is best-effort and eventual — not guaranteed or ordered.
+  /// [data] is opaque: use any encoding (JSON, plain text, Protobuf, etc.).
+  void broadcast(String data) {
+    final dataPtr = data.toNativeUtf8();
+    final errPtr = calloc<Pointer<Utf8>>();
+    try {
+      final result = _bindings.memberlistBroadcast(_handle, dataPtr.cast(), errPtr.cast());
+      if (result < 0) {
+        throw GossiperException('Broadcast failed: ${_readErr(_bindings, errPtr)}');
+      }
+    } finally {
+      calloc.free(dataPtr);
+      calloc.free(errPtr);
+    }
+  }
+
+  /// Stream of messages received from other cluster nodes.
+  ///
+  /// Messages are raw strings exactly as sent by [broadcast] on the remote node.
+  /// Each call resets the poll interval to [pollInterval].
+  Stream<String> messages({Duration pollInterval = const Duration(milliseconds: 500)}) {
+    _messagesPollTimer?.cancel();
+    _messagesPollTimer = Timer.periodic(pollInterval, (_) => _pollMessages());
+    return _messagesController.stream;
+  }
+
+  void _pollMessages() {
+    final ptr = _bindings.memberlistPollMessages(_handle);
+    final json = ptr.cast<Utf8>().toDartString();
+    _bindings.freeString(ptr.cast());
+
+    for (final msg in jsonDecode(json) as List) {
+      _messagesController.add(msg as String);
+    }
+  }
+
+  // -------------------------------------------------------------------------
   // mDNS discovery
   // -------------------------------------------------------------------------
 
@@ -227,10 +272,12 @@ class Gossiper {
   // Lifecycle
   // -------------------------------------------------------------------------
 
-  /// Stops the mDNS advertisement, event polling, and shuts down the node.
+  /// Stops polling, mDNS advertisement, and shuts down the node.
   void dispose() {
     _pollTimer?.cancel();
+    _messagesPollTimer?.cancel();
     _eventController.close();
+    _messagesController.close();
     _bindings.memberlistDestroy(_handle);
   }
 }

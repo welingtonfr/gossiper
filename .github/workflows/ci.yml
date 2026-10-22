@@ -49,20 +49,20 @@ jobs:
 
 
   # ──────────────────────────────────────────────────────────────────────────
-  # Run Dart unit tests (no DLL needed — tests use fake bindings)
+  # Run Flutter unit tests (no DLL needed — tests use fake bindings)
   # ──────────────────────────────────────────────────────────────────────────
   test:
-    name: Dart tests
+    name: Flutter tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dart-lang/setup-dart@v1
+      - uses: subosito/flutter-action@v2
         with:
-          sdk: stable
+          channel: stable
 
-      - run: dart pub get
+      - run: flutter pub get
 
-      - run: dart analyze --fatal-infos
+      - run: flutter analyze --fatal-infos
 
-      - run: dart test --reporter expanded
+      - run: flutter test --reporter expanded

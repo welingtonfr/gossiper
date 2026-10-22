@@ -67,21 +67,21 @@ jobs:
           name: blobs-linux-windows
           path: blobs/
 
-      - uses: dart-lang/setup-dart@v1
+      - uses: subosito/flutter-action@v2
         with:
-          sdk: stable
+          channel: stable
 
-      - run: dart pub get
+      - run: flutter pub get
 
       # Sanity check before publishing
-      - run: dart analyze --fatal-infos
-      - run: dart test --reporter expanded
+      - run: flutter analyze --fatal-infos
+      - run: flutter test --reporter expanded
 
       # Validate the package structure (dry-run)
       - name: Dry-run publish
-        run: dart pub publish --dry-run
+        run: flutter pub publish --dry-run
 
       # Publish — uses OIDC (no stored secrets needed; requires pub.dev OIDC setup)
       # See: https://dart.dev/tools/pub/automated-publishing
       - name: Publish
-        run: dart pub publish --force
+        run: flutter pub publish --force

@@ -44,6 +44,12 @@ func lookup(handle C.int64_t) *memberlist.Memberlist {
 	return registry[int64(handle)]
 }
 
+func lookupDelegate(handle C.int64_t) *gossipDelegate {
+	mu.Lock()
+	defer mu.Unlock()
+	return delegates[int64(handle)]
+}
+
 func remove(handle C.int64_t) {
 	mu.Lock()
 	defer mu.Unlock()
@@ -53,7 +59,17 @@ func remove(handle C.int64_t) {
 }
 
 // ---------------------------------------------------------------------------
-// Event delegate — queues node join/leave/update events for Dart to poll
+// simpleBroadcast — implements memberlist.Broadcast for the queue
+// ---------------------------------------------------------------------------
+
+type simpleBroadcast struct{ msg []byte }
+
+func (b *simpleBroadcast) Invalidates(other memberlist.Broadcast) bool { return false }
+func (b *simpleBroadcast) Message() []byte                              { return b.msg }
+func (b *simpleBroadcast) Finished()                                    {}
+
+// ---------------------------------------------------------------------------
+// gossipDelegate — implements memberlist.EventDelegate + memberlist.Delegate
 // ---------------------------------------------------------------------------
 
 const (
@@ -70,9 +86,28 @@ type nodeEvent struct {
 }
 
 type gossipDelegate struct {
-	mu     sync.Mutex
-	events []nodeEvent
+	mu         sync.Mutex
+	events     []nodeEvent
+	received   []string
+	broadcasts *memberlist.TransmitLimitedQueue
+	ml         *memberlist.Memberlist // wired after Create
 }
+
+func newDelegate() *gossipDelegate {
+	d := &gossipDelegate{}
+	d.broadcasts = &memberlist.TransmitLimitedQueue{
+		NumNodes: func() int {
+			if d.ml == nil {
+				return 1
+			}
+			return d.ml.NumMembers()
+		},
+		RetransmitMult: 3,
+	}
+	return d
+}
+
+// memberlist.EventDelegate
 
 func (d *gossipDelegate) NotifyJoin(n *memberlist.Node) {
 	d.mu.Lock()
@@ -92,7 +127,31 @@ func (d *gossipDelegate) NotifyUpdate(n *memberlist.Node) {
 	d.events = append(d.events, nodeEvent{EventUpdate, n.Name, n.Addr.String(), int(n.Port)})
 }
 
-func (d *gossipDelegate) drainJSON() string {
+// memberlist.Delegate
+
+func (d *gossipDelegate) NodeMeta(limit int) []byte { return nil }
+
+func (d *gossipDelegate) NotifyMsg(b []byte) {
+	if len(b) == 0 {
+		return
+	}
+	msg := make([]byte, len(b))
+	copy(msg, b)
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.received = append(d.received, string(msg))
+}
+
+func (d *gossipDelegate) GetBroadcasts(overhead, limit int) [][]byte {
+	return d.broadcasts.GetBroadcasts(overhead, limit)
+}
+
+func (d *gossipDelegate) LocalState(join bool) []byte        { return nil }
+func (d *gossipDelegate) MergeRemoteState(buf []byte, join bool) {}
+
+// drain helpers
+
+func (d *gossipDelegate) drainEvents() string {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if len(d.events) == 0 {
@@ -100,6 +159,17 @@ func (d *gossipDelegate) drainJSON() string {
 	}
 	b, _ := json.Marshal(d.events)
 	d.events = d.events[:0]
+	return string(b)
+}
+
+func (d *gossipDelegate) drainMessages() string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if len(d.received) == 0 {
+		return "[]"
+	}
+	b, _ := json.Marshal(d.received)
+	d.received = d.received[:0]
 	return string(b)
 }
 
@@ -123,8 +193,9 @@ func MemberlistCreate(nameC *C.char, bindAddrC *C.char, bindPort C.int, errOut *
 		cfg.BindPort = int(bindPort)
 	}
 
-	d := &gossipDelegate{}
+	d := newDelegate()
 	cfg.Events = d
+	cfg.Delegate = d
 	cfg.Logger = nil
 	cfg.LogOutput = nil
 
@@ -134,6 +205,7 @@ func MemberlistCreate(nameC *C.char, bindAddrC *C.char, bindPort C.int, errOut *
 		return -1
 	}
 
+	d.ml = m // wire up after creation so NumNodes can call NumMembers
 	return C.int64_t(register(m, d))
 }
 
@@ -220,22 +292,19 @@ func MemberlistNumMembers(handle C.int64_t) C.int {
 	return C.int(m.NumMembers())
 }
 
-// MemberlistPollEvents drains pending node events as a JSON array.
+// MemberlistPollEvents drains pending membership events as a JSON array.
 // Caller must call FreeString on the returned pointer.
 //
 //export MemberlistPollEvents
 func MemberlistPollEvents(handle C.int64_t) *C.char {
-	mu.Lock()
-	d := delegates[int64(handle)]
-	mu.Unlock()
+	d := lookupDelegate(handle)
 	if d == nil {
 		return C.CString("[]")
 	}
-	return C.CString(d.drainJSON())
+	return C.CString(d.drainEvents())
 }
 
 // MemberlistLeave gracefully leaves the cluster.
-// timeoutMs is the leave broadcast timeout in milliseconds.
 //
 //export MemberlistLeave
 func MemberlistLeave(handle C.int64_t, timeoutMs C.int, errOut **C.char) C.int {
@@ -256,7 +325,6 @@ func MemberlistLeave(handle C.int64_t, timeoutMs C.int, errOut **C.char) C.int {
 //
 //export MemberlistDestroy
 func MemberlistDestroy(handle C.int64_t) {
-	// Stop mDNS first so we don't advertise a dead node
 	MemberlistStopMDNS(handle)
 
 	m := lookup(handle)
@@ -267,14 +335,44 @@ func MemberlistDestroy(handle C.int64_t) {
 }
 
 // ---------------------------------------------------------------------------
+// Exported C functions — broadcast messaging
+// ---------------------------------------------------------------------------
+
+// MemberlistBroadcast queues a message to be gossiped to every node in the cluster.
+//
+// data is an opaque byte string; gossiper does not interpret it — use JSON,
+// Protobuf, or any encoding your application chooses.
+// Returns 0 on success, -1 on error.
+//
+//export MemberlistBroadcast
+func MemberlistBroadcast(handle C.int64_t, dataC *C.char, errOut **C.char) C.int {
+	d := lookupDelegate(handle)
+	if d == nil {
+		setErr(errOut, "invalid handle")
+		return -1
+	}
+	d.broadcasts.QueueBroadcast(&simpleBroadcast{[]byte(C.GoString(dataC))})
+	return 0
+}
+
+// MemberlistPollMessages drains messages received from other cluster nodes.
+// Returns a JSON array of raw message strings.
+// Caller must call FreeString on the returned pointer.
+//
+//export MemberlistPollMessages
+func MemberlistPollMessages(handle C.int64_t) *C.char {
+	d := lookupDelegate(handle)
+	if d == nil {
+		return C.CString("[]")
+	}
+	return C.CString(d.drainMessages())
+}
+
+// ---------------------------------------------------------------------------
 // Exported C functions — mDNS discovery
 // ---------------------------------------------------------------------------
 
 // MemberlistStartMDNS advertises this node on the local network via mDNS.
-//
-// serviceName should follow the mDNS convention, e.g. "_gossiper._tcp".
-// Other nodes can discover it by calling MemberlistDiscoverMDNS with the
-// same serviceName.
 //
 //export MemberlistStartMDNS
 func MemberlistStartMDNS(handle C.int64_t, serviceNameC *C.char, errOut **C.char) C.int {
@@ -287,7 +385,6 @@ func MemberlistStartMDNS(handle C.int64_t, serviceNameC *C.char, errOut **C.char
 	node := m.LocalNode()
 	serviceName := C.GoString(serviceNameC)
 
-	// Resolve the node's bind address to a usable IP for mDNS
 	ips, err := localIPs(node.Addr.String())
 	if err != nil {
 		setErr(errOut, "could not resolve local IPs: "+err.Error())
@@ -295,13 +392,7 @@ func MemberlistStartMDNS(handle C.int64_t, serviceNameC *C.char, errOut **C.char
 	}
 
 	svc, err := mdns.NewMDNSService(
-		node.Name,   // instance name (unique per node)
-		serviceName, // service type, e.g. "_gossiper._tcp"
-		"",          // domain — "" defaults to "local."
-		"",          // host — "" defaults to hostname
-		int(node.Port),
-		ips,
-		[]string{"gossiper"},
+		node.Name, serviceName, "", "", int(node.Port), ips, []string{"gossiper"},
 	)
 	if err != nil {
 		setErr(errOut, "mdns service init failed: "+err.Error())
@@ -315,7 +406,6 @@ func MemberlistStartMDNS(handle C.int64_t, serviceNameC *C.char, errOut **C.char
 	}
 
 	mu.Lock()
-	// Shut down any previous mDNS server for this handle
 	if old, ok := mdnsServers[int64(handle)]; ok {
 		old.Shutdown() //nolint:errcheck
 	}
@@ -342,10 +432,7 @@ func MemberlistStopMDNS(handle C.int64_t) {
 }
 
 // MemberlistDiscoverMDNS queries the local network for nodes advertising the
-// given serviceName via mDNS and returns a JSON array of "addr:port" strings
-// suitable for passing to MemberlistJoin.
-//
-// timeoutMs controls how long to wait for responses (minimum ~100ms recommended).
+// given serviceName and returns a JSON array of "addr:port" strings.
 // Caller must call FreeString on the returned pointer.
 //
 //export MemberlistDiscoverMDNS
@@ -382,7 +469,7 @@ func MemberlistDiscoverMDNS(serviceNameC *C.char, timeoutMs C.int) *C.char {
 }
 
 // ---------------------------------------------------------------------------
-// FreeString — must be called for every *C.char returned by this library
+// FreeString
 // ---------------------------------------------------------------------------
 
 //export FreeString
@@ -400,15 +487,12 @@ func setErr(errOut **C.char, msg string) {
 	}
 }
 
-// localIPs returns usable non-loopback IPs for the given address.
-// If addr is "0.0.0.0" or "::" it enumerates the machine's interfaces.
 func localIPs(addr string) ([]net.IP, error) {
 	ip := net.ParseIP(addr)
 	if ip != nil && !ip.IsUnspecified() {
 		return []net.IP{ip}, nil
 	}
 
-	// Bind address is wildcard — pick all non-loopback unicast IPs
 	ifaces, err := net.Interfaces()
 	if err != nil {
 		return nil, err
@@ -436,16 +520,16 @@ func localIPs(addr string) ([]net.IP, error) {
 		}
 	}
 	if len(ips) == 0 {
-		return nil, net.ErrWriteToConnected // no suitable interface
+		return nil, net.ErrWriteToConnected
 	}
 	return ips, nil
 }
 
 func itoa(n int) string {
-	b := make([]byte, 0, 8)
 	if n == 0 {
 		return "0"
 	}
+	b := make([]byte, 0, 8)
 	for n > 0 {
 		b = append([]byte{byte('0' + n%10)}, b...)
 		n /= 10

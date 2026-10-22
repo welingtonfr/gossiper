@@ -47,22 +47,25 @@ Dart gossip-protocol library that wraps **[hashicorp/memberlist](https://github.
 ```
 gossiper/
 ├── CLAUDE.md
-├── pubspec.yaml                         dart package manifest (ffi dep)
+├── pubspec.yaml                         Flutter plugin manifest
 ├── lib/
 │   ├── gossiper.dart                    re-exports public symbols
 │   └── src/
 │       ├── gossiper_base.dart           Gossiper, MemberNode, NodeEvent
 │       └── gossiper_bindings.dart       raw FFI typedefs + loader
+├── windows/
+│   └── CMakeLists.txt                   bundles blobs/windows/gossiper.dll
+├── linux/
+│   └── CMakeLists.txt                   bundles blobs/linux/libgossiper.so
 ├── native/
 │   └── memberlist_wrapper/
 │       ├── wrapper.go                   CGO exports for memberlist + mDNS
 │       ├── go.mod                       Go module (memberlist + mdns)
 │       ├── build.ps1                    Windows build → blobs/windows/
-│       └── Makefile                     Linux/macOS build → blobs/linux|macos/
-├── blobs/                               compiled .dll/.so/.dylib (gitignored)
+│       └── Makefile                     Linux build → blobs/linux/
+├── blobs/                               compiled .dll/.so (gitignored, built by CI)
 │   ├── windows/gossiper.dll
-│   ├── linux/libgossiper.so
-│   └── macos/libgossiper.dylib
+│   └── linux/libgossiper.so
 ├── example/gossiper_example.dart
 └── test/gossiper_test.dart
 ```
@@ -222,6 +225,5 @@ Integration tests that spin up real nodes require the compiled `.dll`/`.so` in t
 ## Roadmap
 
 - [ ] User data / metadata per node (memberlist `Delegate`)
-- [ ] Broadcast messages across the cluster
 - [ ] Pre-built blobs in CI (GitHub Actions matrix: windows/linux/macos)
 - [ ] Flutter plugin wrapper

@@ -15,10 +15,11 @@ list, no service registry, no config files.
 ## Features
 
 - **Gossip protocol** — eventual consistency, fault-tolerant cluster membership
+- **Broadcast messaging** — send a message to every node in the cluster; receive messages as a `Stream<String>`
 - **Auto-discovery** — nodes find each other on the same LAN via mDNS with no configuration
 - **Event stream** — subscribe to join / leave / update events as a Dart `Stream`
+- **Flutter FFI plugin** — native library bundled automatically by Flutter's build system; no manual `.dll` copying
 - **Cross-platform** — Windows (`.dll`), Linux (`.so`)
-- **Pure Dart API** — no platform channels, no code generation
 
 ---
 
@@ -37,12 +38,15 @@ list, no service registry, no config files.
 
 ```yaml
 dependencies:
-  gossiper: ^0.1.0
+  gossiper: ^0.2.0
 ```
 
-The pre-built native libraries ship inside the package under `blobs/`.  
-Copy the correct file for your platform next to your executable, or pass
-`libPath:` to `Gossiper.create` to point at an arbitrary path.
+This is a **Flutter FFI plugin**. Flutter's build system automatically bundles
+the correct native library (`.dll` on Windows, `.so` on Linux) alongside your
+app — no manual copying required.
+
+For plain Dart CLI projects, copy the blob next to your executable or pass
+`libPath:` to `Gossiper.create`:
 
 ```
 blobs/
@@ -80,12 +84,18 @@ void main() async {
     print('[${e.type.name}] ${e.node.name} @ ${e.node.address}');
   });
 
-  // 5. Inspect members
+  // 5. Broadcast a message to every peer
+  node.broadcast('{"hello":"world"}');
+
+  // 6. Receive messages from other nodes
+  node.messages().listen((msg) => print('received: $msg'));
+
+  // 7. Inspect members
   for (final m in node.members()) {
     print('  • ${m.name}  ${m.address}');
   }
 
-  // 6. Graceful shutdown
+  // 8. Graceful shutdown
   await Future.delayed(Duration(minutes: 1));
   node.leave();
   node.dispose();
@@ -165,6 +175,23 @@ Each `NodeEvent` has:
 - `type` — `NodeEventType.join`, `.leave`, or `.update`
 - `node` — `MemberNode(name, addr, port)`
 
+### Broadcast messaging
+
+```dart
+// Send a message to every node in the cluster (best-effort, eventual delivery)
+node.broadcast('{"op":"set","key":"x","val":42}');
+
+// Receive messages from other nodes
+node.messages().listen((msg) => print('got: $msg'));
+```
+
+| Method | Returns | Description |
+|---|---|---|
+| `broadcast(data)` | `void` | Queue a message to be gossiped cluster-wide |
+| `messages({pollInterval})` | `Stream<String>` | Stream of raw messages received from peers |
+
+Delivery is best-effort and unordered — use any encoding (JSON, plain text, Protobuf).
+
 ---
 
 ## Building the native library
@@ -214,6 +241,15 @@ Dart API (lib/)
 The Go wrapper exposes a plain C ABI via CGO. Complex data (member lists,
 events, addresses) is exchanged as JSON strings. Node instances are managed
 server-side and referenced from Dart by opaque `int64` handles.
+
+---
+
+## Roadmap
+
+- [x] Broadcast messages across the cluster
+- [x] User data / metadata per node (memberlist `Delegate`)
+- [ ] Pre-built blobs in CI (GitHub Actions matrix: windows/linux)
+- [ ] Flutter plugin wrapper
 
 ---
 

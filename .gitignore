@@ -10,6 +10,8 @@ pubspec.lock
 # dart pub publish includes them because they are built before publishing.
 blobs/
 
+build/
+
 # Go build artifacts
 native/memberlist_wrapper/*.h
 native/memberlist_wrapper/gossiper.dll
