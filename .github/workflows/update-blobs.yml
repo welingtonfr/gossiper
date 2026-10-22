@@ -11,6 +11,7 @@ jobs:
   build-and-commit:
     name: Build Linux + Windows blobs
     runs-on: ubuntu-latest
+    environment: blob-build   # pauses for manager approval before running
     permissions:
       contents: write
     # Skip bot commits to avoid infinite loops
