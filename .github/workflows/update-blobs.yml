@@ -4,6 +4,7 @@ name: Update native blobs
 # committing the result back to the PR branch so reviewers see updated blobs.
 on:
   pull_request:
+    types: [opened, reopened, ready_for_review]
     paths:
       - 'native/memberlist_wrapper/**'
 
