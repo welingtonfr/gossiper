@@ -86,6 +86,7 @@ GossiperBindings _fakeBindings({
       return _cstr(jsonEncode(batch));
     },
     memberlistSetReplayWindow: (h, maxEntries, windowHours) {},
+    memberlistSetPersistPath: (h, path) {},
     freeString: (ptr) => calloc.free(ptr),
   );
 }
@@ -282,6 +283,43 @@ void main() {
     });
   });
 
+  group('setPersistPath', () {
+    test('completes without error', () {
+      final g = Gossiper.withBindings(_fakeBindings());
+      expect(() => g.setPersistPath('/tmp/gossiper_test.log'), returnsNormally);
+      g.dispose();
+    });
+
+    test('create applies persistPath', () {
+      var capturedPath = '';
+      final bindings = _fakeBindings();
+      final b = GossiperBindings.fake(
+        memberlistCreate: bindings.memberlistCreate,
+        memberlistJoin: bindings.memberlistJoin,
+        memberlistMembers: bindings.memberlistMembers,
+        memberlistLocalNode: bindings.memberlistLocalNode,
+        memberlistNumMembers: bindings.memberlistNumMembers,
+        memberlistPollEvents: bindings.memberlistPollEvents,
+        memberlistLeave: bindings.memberlistLeave,
+        memberlistDestroy: bindings.memberlistDestroy,
+        memberlistStartMDNS: bindings.memberlistStartMDNS,
+        memberlistStopMDNS: bindings.memberlistStopMDNS,
+        memberlistDiscoverMDNS: bindings.memberlistDiscoverMDNS,
+        memberlistBroadcast: bindings.memberlistBroadcast,
+        memberlistPollMessages: bindings.memberlistPollMessages,
+        memberlistSetReplayWindow: bindings.memberlistSetReplayWindow,
+        memberlistSetPersistPath: (h, path) {
+          capturedPath = path.cast<Utf8>().toDartString();
+        },
+        freeString: bindings.freeString,
+      );
+      final g = Gossiper.withBindings(b);
+      g.setPersistPath('/data/gossiper.log');
+      expect(capturedPath, equals('/data/gossiper.log'));
+      g.dispose();
+    });
+  });
+
   group('setReplayWindow', () {
     test('completes without error with default params', () {
       final g = Gossiper.withBindings(_fakeBindings());
@@ -312,6 +350,7 @@ void main() {
           capturedEntries = max;
           capturedHours = hours;
         },
+        memberlistSetPersistPath: bindings.memberlistSetPersistPath,
         freeString: bindings.freeString,
       );
       final g = Gossiper.withBindings(b);

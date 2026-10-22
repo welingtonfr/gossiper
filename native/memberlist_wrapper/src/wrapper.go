@@ -6,8 +6,10 @@ package main
 */
 import "C"
 import (
+	"bufio"
 	"encoding/json"
 	"net"
+	"os"
 	"sort"
 	"sync"
 	"time"
@@ -95,14 +97,15 @@ type logEntry struct {
 }
 
 type gossipDelegate struct {
-	mu         sync.Mutex
-	events     []nodeEvent
-	received   []string
-	broadcasts *memberlist.TransmitLimitedQueue
-	ml         *memberlist.Memberlist
-	msgLog     []logEntry
-	maxLog     int
-	logWindow  time.Duration
+	mu          sync.Mutex
+	events      []nodeEvent
+	received    []string
+	broadcasts  *memberlist.TransmitLimitedQueue
+	ml          *memberlist.Memberlist
+	msgLog      []logEntry
+	maxLog      int
+	logWindow   time.Duration
+	persistPath string
 }
 
 func newDelegate() *gossipDelegate {
@@ -122,7 +125,92 @@ func newDelegate() *gossipDelegate {
 	return d
 }
 
+// loadFromDisk reads the JSON-lines persist file and merges entries into msgLog.
+// Must be called with d.mu held.
+func (d *gossipDelegate) loadFromDisk() {
+	if d.persistPath == "" {
+		return
+	}
+	f, err := os.Open(d.persistPath)
+	if err != nil {
+		return // file doesn't exist yet — fine on first run
+	}
+	defer f.Close()
+	known := make(map[string]bool, len(d.msgLog))
+	for _, e := range d.msgLog {
+		known[e.ID] = true
+	}
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if len(line) == 0 {
+			continue
+		}
+		var entry logEntry
+		if err := json.Unmarshal(line, &entry); err != nil || entry.ID == "" {
+			continue
+		}
+		if !known[entry.ID] {
+			d.msgLog = append(d.msgLog, entry)
+			known[entry.ID] = true
+		}
+	}
+	sort.Slice(d.msgLog, func(i, j int) bool {
+		return d.msgLog[i].At < d.msgLog[j].At
+	})
+}
+
+// appendToDisk appends one entry as a JSON line to the persist file.
+// Must be called with d.mu held.
+func (d *gossipDelegate) appendToDisk(entry logEntry) {
+	if d.persistPath == "" {
+		return
+	}
+	line, err := json.Marshal(entry)
+	if err != nil {
+		return
+	}
+	f, err := os.OpenFile(d.persistPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	f.Write(append(line, '\n')) //nolint:errcheck
+}
+
+// rewriteDisk atomically rewrites the persist file with the current msgLog.
+// Must be called with d.mu held.
+func (d *gossipDelegate) rewriteDisk() {
+	if d.persistPath == "" {
+		return
+	}
+	tmp := d.persistPath + ".tmp"
+	f, err := os.Create(tmp)
+	if err != nil {
+		return
+	}
+	ok := true
+	for _, entry := range d.msgLog {
+		line, err := json.Marshal(entry)
+		if err != nil {
+			ok = false
+			break
+		}
+		if _, err := f.Write(append(line, '\n')); err != nil {
+			ok = false
+			break
+		}
+	}
+	f.Close()
+	if ok {
+		os.Rename(tmp, d.persistPath) //nolint:errcheck
+	} else {
+		os.Remove(tmp) //nolint:errcheck
+	}
+}
+
 // pruneLog removes entries older than logWindow or beyond maxLog cap.
+// Rewrites disk only when entries are actually removed.
 // Must be called with d.mu held.
 func (d *gossipDelegate) pruneLog() {
 	cutoff := time.Now().Add(-d.logWindow).UnixMilli()
@@ -130,9 +218,13 @@ func (d *gossipDelegate) pruneLog() {
 	for start < len(d.msgLog) && d.msgLog[start].At < cutoff {
 		start++
 	}
+	pruned := start > 0 || len(d.msgLog) > d.maxLog
 	d.msgLog = d.msgLog[start:]
 	if len(d.msgLog) > d.maxLog {
 		d.msgLog = d.msgLog[len(d.msgLog)-d.maxLog:]
+	}
+	if pruned {
+		d.rewriteDisk()
 	}
 }
 
@@ -179,6 +271,7 @@ func (d *gossipDelegate) NotifyMsg(b []byte) {
 	}
 	d.msgLog = append(d.msgLog, entry)
 	d.received = append(d.received, entry.Data)
+	d.appendToDisk(entry)
 	d.pruneLog()
 }
 
@@ -216,17 +309,22 @@ func (d *gossipDelegate) MergeRemoteState(buf []byte, join bool) {
 	for _, e := range d.msgLog {
 		known[e.ID] = true
 	}
+	added := 0
 	for _, e := range incoming {
 		if !known[e.ID] {
 			d.msgLog = append(d.msgLog, e)
 			d.received = append(d.received, e.Data)
 			known[e.ID] = true
+			added++
 		}
 	}
 	sort.Slice(d.msgLog, func(i, j int) bool {
 		return d.msgLog[i].At < d.msgLog[j].At
 	})
 	d.pruneLog()
+	if added > 0 {
+		d.rewriteDisk()
+	}
 }
 
 // drain helpers
@@ -439,6 +537,7 @@ func MemberlistBroadcast(handle C.int64_t, dataC *C.char, errOut **C.char) C.int
 	b, _ := json.Marshal(entry)
 	d.mu.Lock()
 	d.msgLog = append(d.msgLog, entry)
+	d.appendToDisk(entry)
 	d.pruneLog()
 	d.mu.Unlock()
 	d.broadcasts.QueueBroadcast(&simpleBroadcast{b})
@@ -464,6 +563,23 @@ func MemberlistSetReplayWindow(handle C.int64_t, maxEntries C.int, windowHours C
 	if windowHours > 0 {
 		d.logWindow = time.Duration(windowHours) * time.Hour
 	}
+}
+
+// MemberlistSetPersistPath configures a file path for durable message log storage.
+// On call, the existing file (if any) is loaded and merged into the in-memory log,
+// so a node that restarts automatically recovers its message history before joining.
+// Pass an empty string to disable persistence.
+//
+//export MemberlistSetPersistPath
+func MemberlistSetPersistPath(handle C.int64_t, pathC *C.char) {
+	d := lookupDelegate(handle)
+	if d == nil {
+		return
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.persistPath = C.GoString(pathC)
+	d.loadFromDisk()
 }
 
 // MemberlistPollMessages drains messages received from other cluster nodes.

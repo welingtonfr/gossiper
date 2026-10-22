@@ -112,6 +112,15 @@ typedef MemberlistSetReplayWindowDart = void Function(
   int windowHours,
 );
 
+typedef _MemberlistSetPersistPathNative = Void Function(
+  Int64 handle,
+  Pointer<Utf8> path,
+);
+typedef MemberlistSetPersistPathDart = void Function(
+  int handle,
+  Pointer<Utf8> path,
+);
+
 // ---------------------------------------------------------------------------
 // FreeString
 // ---------------------------------------------------------------------------
@@ -138,6 +147,7 @@ class GossiperBindings {
   final MemberlistBroadcastDart memberlistBroadcast;
   final MemberlistPollMessagesDart memberlistPollMessages;
   final MemberlistSetReplayWindowDart memberlistSetReplayWindow;
+  final MemberlistSetPersistPathDart memberlistSetPersistPath;
   final FreeStringDart freeString;
 
   GossiperBindings._({
@@ -155,6 +165,7 @@ class GossiperBindings {
     required this.memberlistBroadcast,
     required this.memberlistPollMessages,
     required this.memberlistSetReplayWindow,
+    required this.memberlistSetPersistPath,
     required this.freeString,
   });
 
@@ -193,6 +204,9 @@ class GossiperBindings {
       memberlistSetReplayWindow: lib
           .lookup<NativeFunction<_MemberlistSetReplayWindowNative>>('MemberlistSetReplayWindow')
           .asFunction(),
+      memberlistSetPersistPath: lib
+          .lookup<NativeFunction<_MemberlistSetPersistPathNative>>('MemberlistSetPersistPath')
+          .asFunction(),
       freeString: lib.lookup<NativeFunction<_FreeStringNative>>('FreeString').asFunction(),
     );
   }
@@ -213,6 +227,7 @@ class GossiperBindings {
     required MemberlistBroadcastDart memberlistBroadcast,
     required MemberlistPollMessagesDart memberlistPollMessages,
     required MemberlistSetReplayWindowDart memberlistSetReplayWindow,
+    required MemberlistSetPersistPathDart memberlistSetPersistPath,
     required FreeStringDart freeString,
   }) =>
       GossiperBindings._(
@@ -230,6 +245,7 @@ class GossiperBindings {
         memberlistBroadcast: memberlistBroadcast,
         memberlistPollMessages: memberlistPollMessages,
         memberlistSetReplayWindow: memberlistSetReplayWindow,
+        memberlistSetPersistPath: memberlistSetPersistPath,
         freeString: freeString,
       );
 }

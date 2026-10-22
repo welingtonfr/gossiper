@@ -58,6 +58,7 @@ class Gossiper {
     String? libPath,
     int replayMaxEntries = 500,
     Duration replayWindow = const Duration(hours: 24),
+    String? persistPath,
   }) {
     final bindings = _loadLib(libPath);
 
@@ -79,6 +80,7 @@ class Gossiper {
 
       final g = Gossiper._(bindings, handle);
       g.setReplayWindow(maxEntries: replayMaxEntries, window: replayWindow);
+      if (persistPath != null) g.setPersistPath(persistPath);
       return g;
     } finally {
       if (namePtr != nullptr) calloc.free(namePtr);
@@ -171,6 +173,23 @@ class Gossiper {
   // -------------------------------------------------------------------------
   // Replay window configuration
   // -------------------------------------------------------------------------
+
+  /// Configures durable message log storage.
+  ///
+  /// When set, every broadcast message is appended to [path] as a JSON line.
+  /// On startup the file is loaded before the node joins the cluster, so a
+  /// PDV that restarts recovers its message history automatically — even if
+  /// every other node was also restarted in the meantime.
+  ///
+  /// Pass an empty string to disable persistence.
+  void setPersistPath(String path) {
+    final pathPtr = path.toNativeUtf8();
+    try {
+      _bindings.memberlistSetPersistPath(_handle, pathPtr.cast());
+    } finally {
+      calloc.free(pathPtr);
+    }
+  }
 
   /// Configures the in-memory message replay log.
   ///
