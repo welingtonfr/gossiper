@@ -55,5 +55,5 @@ jobs:
             echo "Blobs unchanged — nothing to commit."
           else
             git commit -m "chore: rebuild native blobs"
-            git push origin HEAD:${{ github.ref_name }}
+            git push origin HEAD:${{ github.head_ref }}
           fi
