@@ -6,6 +6,7 @@ description: >-
 version: 0.1.0
 repository: https://github.com/welingtonfr/gossiper
 issue_tracker: https://github.com/welingtonfr/gossiper/issues
+license: MIT
 
 environment:
   sdk: ^3.12.2
