@@ -25,6 +25,9 @@ jobs:
       - run: flutter analyze --fatal-infos
       - run: flutter test --reporter expanded
 
+      # flutter pub get may modify analysis_options.yaml; reset before pub sees it
+      - run: git checkout -- .
+
       # Validate the package structure (dry-run)
       - name: Dry-run publish
         run: flutter pub publish --dry-run
