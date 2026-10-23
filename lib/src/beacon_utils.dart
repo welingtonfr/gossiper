@@ -49,12 +49,16 @@ abstract final class BeaconUtils {
     required int numMembers,
     required void Function(String addr) onJoin,
   }) {
+    String? addrToJoin;
     try {
       final map = jsonDecode(payload) as Map<String, dynamic>;
       if (map['type'] != beaconType) return;
       final remoteAddr = map['addr'] as String?;
       if (remoteAddr == null || remoteAddr == selfAddr) return;
-      if (numMembers <= 1) onJoin(remoteAddr);
-    } catch (_) {}
+      if (numMembers <= 1) addrToJoin = remoteAddr;
+    } catch (_) {
+      return;
+    }
+    if (addrToJoin != null) onJoin(addrToJoin);
   }
 }
