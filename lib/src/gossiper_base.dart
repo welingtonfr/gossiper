@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:ffi';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:ffi/ffi.dart';
 import 'package:gossiper/src/domain/entities/member_node.dart';
@@ -9,6 +10,7 @@ import 'package:gossiper/src/domain/entities/node_event.dart';
 import 'package:gossiper/src/domain/exceptions/gossiper_exception.dart';
 import 'package:gossiper/src/domain/vos/node_event_type.dart';
 
+import 'beacon_utils.dart';
 import 'gossiper_bindings.dart';
 
 // Reads an error C string from errPtr safely and frees it.
@@ -28,6 +30,8 @@ class Gossiper {
   Timer? _messagesPollTimer;
   final _eventController = StreamController<NodeEvent>.broadcast();
   final _messagesController = StreamController<String>.broadcast();
+  RawDatagramSocket? _beaconSocket;
+  Timer? _beaconTimer;
 
   Gossiper._(this._bindings, this._handle);
 
@@ -43,6 +47,33 @@ class Gossiper {
   static String _defaultLibPath() {
     if (Platform.isWindows) return 'gossiper.dll';
     return 'libgossiper.so';
+  }
+
+  /// Resolves the best LAN IPv4 address on this machine.
+  ///
+  /// Skips loopback, link-local, and known virtual adapter addresses
+  /// (Docker, WSL2, VirtualBox, VMware, KVM). Prefers `192.168.x.x` and
+  /// `10.x.x.x` ranges; falls back to the first other routable address,
+  /// or `'0.0.0.0'` if nothing is found.
+  ///
+  /// Useful for passing an explicit [bindAddr] to [create] on machines
+  /// with multiple network interfaces.
+  static Future<String> resolveLanIp() async {
+    final interfaces = await NetworkInterface.list(
+      type: InternetAddressType.IPv4,
+      includeLinkLocal: false,
+    );
+    String? fallback;
+    for (final iface in interfaces) {
+      for (final addr in iface.addresses) {
+        final ip = addr.address;
+        if (ip.startsWith('127.') || ip.startsWith('169.254.')) continue;
+        if (BeaconUtils.isVirtualInterface(iface, ip)) continue;
+        if (ip.startsWith('192.168.') || ip.startsWith('10.')) return ip;
+        fallback ??= ip;
+      }
+    }
+    return fallback ?? '0.0.0.0';
   }
 
   /// Creates a new Gossiper node.
@@ -115,7 +146,9 @@ class Gossiper {
     final ptr = _bindings.memberlistMembers(_handle);
     final json = ptr.cast<Utf8>().toDartString();
     _bindings.freeString(ptr.cast());
-    return (jsonDecode(json) as List).map((e) => MemberNode.fromJson(e as Map<String, dynamic>)).toList();
+    final decoded = jsonDecode(json);
+    if (decoded is! List) return [];
+    return decoded.map((e) => MemberNode.fromJson(e as Map<String, dynamic>)).toList();
   }
 
   /// Returns this node's own info.
@@ -159,7 +192,9 @@ class Gossiper {
     final json = ptr.cast<Utf8>().toDartString();
     _bindings.freeString(ptr.cast());
 
-    for (final item in jsonDecode(json) as List) {
+    final decoded = jsonDecode(json);
+    if (decoded is! List) return;
+    for (final item in decoded) {
       final map = item as Map<String, dynamic>;
       final type = switch (map['type'] as int) {
         0 => NodeEventType.join,
@@ -242,21 +277,36 @@ class Gossiper {
     final json = ptr.cast<Utf8>().toDartString();
     _bindings.freeString(ptr.cast());
 
-    for (final msg in jsonDecode(json) as List) {
+    final decoded = jsonDecode(json);
+    if (decoded is! List) return;
+    for (final msg in decoded) {
       _messagesController.add(msg as String);
     }
   }
 
   // -------------------------------------------------------------------------
-  // mDNS discovery
+  // Discovery (mDNS + beacon)
   // -------------------------------------------------------------------------
 
-  /// Advertises this node on the local network via mDNS.
+  /// Starts all discovery mechanisms for this node:
   ///
-  /// [serviceName] follows the mDNS convention, e.g. `"_gossiper._tcp"`.
-  /// Other nodes call [discoverPeers] with the same service name to find it.
-  /// Call [stopDiscovery] or [dispose] to stop advertising.
-  void startDiscovery({String serviceName = '_gossiper._tcp'}) {
+  /// 1. mDNS advertisement — responds to queries from peers calling [discoverPeers].
+  /// 2. UDP beacon — broadcasts this node's address on the LAN every [beaconInterval]
+  ///    and automatically calls [join] when it hears another node's beacon.
+  ///
+  /// Both mechanisms run concurrently in the background. The node joins the
+  /// cluster as soon as any peer is found — no additional calls needed.
+  /// Call [stopDiscovery] or [dispose] to stop both.
+  ///
+  /// [beaconType] scopes the beacon to a logical cluster — nodes with
+  /// different types on the same network will not discover each other.
+  Future<void> startDiscovery({
+    String serviceName = '_gossiper._tcp',
+    int beaconPort = 7947,
+    Duration beaconInterval = const Duration(seconds: 5),
+    String beaconType = 'gossiper_hello',
+  }) async {
+    // 1. mDNS advertisement
     final svcPtr = serviceName.toNativeUtf8();
     final errPtr = calloc<Pointer<Utf8>>();
     try {
@@ -268,10 +318,75 @@ class Gossiper {
       calloc.free(svcPtr);
       calloc.free(errPtr);
     }
+
+    // 2. Beacon — non-fatal if UDP is unavailable
+    final lanIp = await _resolveLanIp();
+    final gossipPort = localNode().port;
+    final selfAddr = '$lanIp:$gossipPort';
+
+    _stopBeacon();
+    try {
+      _beaconSocket = await RawDatagramSocket.bind(InternetAddress.anyIPv4, beaconPort);
+      _beaconSocket!.broadcastEnabled = true;
+      _beaconSocket!.listen((event) {
+        if (event != RawSocketEvent.read) return;
+        final dg = _beaconSocket?.receive();
+        if (dg == null) return;
+        _handleBeacon(
+          utf8.decode(dg.data, allowMalformed: true),
+          selfAddr,
+          beaconType,
+        );
+      });
+
+      _sendBeacon(lanIp, gossipPort, beaconPort, beaconType);
+      _beaconTimer = Timer.periodic(beaconInterval, (_) {
+        _sendBeacon(lanIp, gossipPort, beaconPort, beaconType);
+      });
+    } catch (_) {
+      // beacon failure is non-fatal — mDNS still works
+    }
   }
 
-  /// Stops the mDNS advertisement for this node.
-  void stopDiscovery() => _bindings.memberlistStopMDNS(_handle);
+  void _sendBeacon(String lanIp, int gossipPort, int beaconPort, String beaconType) {
+    final socket = _beaconSocket;
+    if (socket == null) return;
+    final payload = Uint8List.fromList(
+      utf8.encode(jsonEncode({'type': beaconType, 'addr': '$lanIp:$gossipPort'})),
+    );
+    try {
+      socket.send(payload, InternetAddress(BeaconUtils.subnetBroadcast(lanIp)), beaconPort);
+    } catch (_) {}
+  }
+
+  void _handleBeacon(String payload, String selfAddr, String beaconType) {
+    BeaconUtils.processBeacon(
+      payload: payload,
+      selfAddr: selfAddr,
+      beaconType: beaconType,
+      numMembers: numMembers(),
+      onJoin: (addr) => join([addr]),
+    );
+  }
+
+  Future<String> _resolveLanIp() async {
+    final nodeAddr = localNode().addr;
+    if (nodeAddr != '0.0.0.0' && !nodeAddr.startsWith('127.')) return nodeAddr;
+    return Gossiper.resolveLanIp();
+  }
+
+  void _stopBeacon() {
+    _beaconTimer?.cancel();
+    _beaconTimer = null;
+    _beaconSocket?.close();
+    _beaconSocket = null;
+  }
+
+  /// Stops mDNS advertisement and beacon broadcasting for this node.
+  void stopDiscovery() {
+    _stopBeacon();
+    _bindings.memberlistStopMDNS(_handle);
+  }
 
   /// Queries the local network for nodes advertising [serviceName] via mDNS.
   ///
@@ -289,7 +404,8 @@ class Gossiper {
       final ptr = _bindings.memberlistDiscoverMDNS(svcPtr.cast(), timeout.inMilliseconds);
       final json = ptr.cast<Utf8>().toDartString();
       _bindings.freeString(ptr.cast());
-      return (jsonDecode(json) as List).cast<String>();
+      final decoded = jsonDecode(json);
+      return decoded is List ? decoded.cast<String>() : [];
     } finally {
       calloc.free(svcPtr);
     }
@@ -312,10 +428,11 @@ class Gossiper {
   // Lifecycle
   // -------------------------------------------------------------------------
 
-  /// Stops polling, mDNS advertisement, and shuts down the node.
+  /// Stops polling, discovery (mDNS + beacon), and shuts down the node.
   void dispose() {
     _pollTimer?.cancel();
     _messagesPollTimer?.cancel();
+    stopDiscovery();
     _eventController.close();
     _messagesController.close();
     _bindings.memberlistDestroy(_handle);
