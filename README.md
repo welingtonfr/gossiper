@@ -3,7 +3,7 @@
 Gossip protocol for Dart and Flutter, powered by
 [hashicorp/memberlist](https://github.com/hashicorp/memberlist) compiled as a
 native shared library and accessed via `dart:ffi`.  
-Includes zero-config peer discovery via **multicast DNS (mDNS)** — no seed
+Includes zero-config peer discovery via **mDNS + UDP beacon** — no seed
 list, no service registry, no config files.
 
 [![pub version](https://img.shields.io/pub/v/gossiper)](https://pub.dev/packages/gossiper)
@@ -16,7 +16,7 @@ list, no service registry, no config files.
 
 - **Gossip protocol** — eventual consistency, fault-tolerant cluster membership
 - **Broadcast messaging** — send a message to every node in the cluster; receive messages as a `Stream<String>`
-- **Auto-discovery** — nodes find each other on the same LAN via mDNS with no configuration
+- **Auto-discovery** — nodes find each other on the same LAN via **mDNS + UDP beacon**; a single `startDiscovery()` call starts both mechanisms and joins the cluster automatically
 - **Event stream** — subscribe to join / leave / update events as a Dart `Stream`
 - **Flutter FFI plugin** — native library bundled automatically by Flutter's build system; no manual `.dll` copying
 - **Cross-platform** — Windows (`.dll`), Linux (`.so`)
@@ -38,7 +38,7 @@ list, no service registry, no config files.
 
 ```yaml
 dependencies:
-  gossiper: ^0.2.0
+  gossiper: ^0.4.0
 ```
 
 This is a **Flutter FFI plugin**. Flutter's build system automatically bundles
@@ -53,22 +53,18 @@ app — no manual copying required.
 import 'package:gossiper/gossiper.dart';
 
 void main() async {
-  // 1. Create a node
+  // 1. Resolve the LAN IP (optional — improves interface selection)
+  final ip = await Gossiper.resolveLanIp();
+
+  // 2. Create a node
   final node = Gossiper.create(
-    name: 'my-node',       // optional — hostname used if omitted
-    bindAddr: '0.0.0.0',
+    name: 'my-node',   // optional — hostname used if omitted
+    bindAddr: ip,
     bindPort: 7946,
   );
 
-  // 2. Advertise on the LAN
-  node.startDiscovery(serviceName: '_myapp._tcp');
-
-  // 3. Discover peers and join (blocks for up to 2 s)
-  final contacted = node.joinViaDiscovery(
-    serviceName: '_myapp._tcp',
-    discoveryTimeout: Duration(seconds: 2),
-  );
-  print('Joined via $contacted peer(s)');
+  // 3. Start discovery — mDNS + UDP beacon, auto-joins when any peer is found
+  await node.startDiscovery(serviceName: '_myapp._tcp');
 
   // 4. Listen for events
   node.events().listen((e) {
@@ -95,31 +91,37 @@ void main() async {
 
 ---
 
-## mDNS discovery
+## Peer discovery
 
-All nodes that call `startDiscovery` with the same `serviceName` on the same
-L2 network automatically see each other — no seed list needed.
+`startDiscovery()` starts two mechanisms simultaneously. The cluster forms as soon as any peer is found — whichever mechanism responds first:
+
+| Mechanism | How it works | Best for |
+|---|---|---|
+| **mDNS** | query/response via multicast UDP | fast initial join (responds in ms) |
+| **UDP beacon** | periodic broadcast every 5 s | late joiners and networks where multicast is filtered |
 
 ```
-Node A                        Node B
-  │                             │
-  ├─ startDiscovery()           ├─ startDiscovery()
-  │   broadcasts on mDNS        │   broadcasts on mDNS
-  │                             │
-  ├─ joinViaDiscovery()         ├─ joinViaDiscovery()
-  │   queries mDNS → finds B    │   queries mDNS → finds A
-  │   memberlist.Join(B) ───────► memberlist.Join(A)
-  │                             │
-  └─────────── gossip ──────────┘
+Node A                           Node B
+  │                                │
+  ├─ await startDiscovery()        ├─ await startDiscovery()
+  │   mDNS server running          │   mDNS server running
+  │   beacon broadcasting          │   beacon broadcasting
+  │   beacon listener active       │   beacon listener active
+  │                                │
+  │   ← beacon from B ─────────────┤  (or mDNS response — whichever first)
+  │   join(B) ─────────────────────►
+  │                                │
+  └──────────── gossip ────────────┘
 ```
 
-`discoverPeers()` is synchronous and blocks for `timeout`. Run it in an
-isolate if you need a non-blocking call:
+For a one-shot mDNS probe (e.g. on retry), `joinViaDiscovery()` is still available:
 
 ```dart
-final peers = await Isolate.run(
-  () => node.discoverPeers(serviceName: '_myapp._tcp'),
-);
+// Explicit one-shot mDNS probe — blocks for discoveryTimeout
+node.joinViaDiscovery(serviceName: '_myapp._tcp');
+
+// Non-blocking version
+await Isolate.run(() => node.discoverPeers(serviceName: '_myapp._tcp'));
 ```
 
 ---
@@ -130,12 +132,23 @@ final peers = await Isolate.run(
 
 ```dart
 static Gossiper create({
-  String? name,           // node name — unique in the cluster
-  String bindAddr,        // default '0.0.0.0'
-  int bindPort,           // default 7946
-  String? libPath,        // override library search path
+  String? name,             // node name — unique in the cluster
+  String bindAddr,          // default '0.0.0.0'
+  int bindPort,             // default 7946
+  String? libPath,          // override library search path
 })
 ```
+
+### `Gossiper.resolveLanIp`
+
+```dart
+static Future<String> resolveLanIp()
+```
+
+Scans network interfaces and returns the best LAN IPv4 address, skipping
+loopback, link-local, and known virtual adapters (Docker, WSL2, VirtualBox,
+VMware, KVM/libvirt). Pass the result to `bindAddr` for reliable interface
+selection on multi-homed machines.
 
 ### Cluster membership
 
@@ -151,10 +164,10 @@ static Gossiper create({
 
 | Method | Returns | Description |
 |---|---|---|
-| `startDiscovery({serviceName})` | `void` | Advertise via mDNS |
-| `stopDiscovery()` | `void` | Stop mDNS advertisement |
-| `discoverPeers({serviceName, timeout})` | `List<String>` | Query mDNS for peers |
-| `joinViaDiscovery({serviceName, discoveryTimeout})` | `int` | Discover + join in one call |
+| `startDiscovery({serviceName, beaconPort, beaconInterval, beaconType})` | `Future<void>` | Start mDNS + beacon; auto-joins on first peer found |
+| `stopDiscovery()` | `void` | Stop mDNS and beacon |
+| `discoverPeers({serviceName, timeout})` | `List<String>` | One-shot mDNS query for peers |
+| `joinViaDiscovery({serviceName, discoveryTimeout})` | `int` | One-shot discover + join via mDNS |
 
 ### Events
 
@@ -273,6 +286,7 @@ server-side and referenced from Dart by opaque `int64` handles.
 - [x] Flutter plugin wrapper
 - [x] Pre-built blobs in CI (GitHub Actions matrix: windows/linux)
 - [x] Message replay on reconnect (missed-message delivery via `LocalState`/`MergeRemoteState`)
+- [x] UDP beacon discovery alongside mDNS; `Gossiper.resolveLanIp()` helper
 - [ ] User data / metadata per node (memberlist `Delegate`)
 - [ ] macOS / Android / iOS support
 
