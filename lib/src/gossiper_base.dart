@@ -49,6 +49,33 @@ class Gossiper {
     return 'libgossiper.so';
   }
 
+  /// Resolves the best LAN IPv4 address on this machine.
+  ///
+  /// Skips loopback, link-local, and known virtual adapter addresses
+  /// (Docker, WSL2, VirtualBox, VMware, KVM). Prefers `192.168.x.x` and
+  /// `10.x.x.x` ranges; falls back to the first other routable address,
+  /// or `'0.0.0.0'` if nothing is found.
+  ///
+  /// Useful for passing an explicit [bindAddr] to [create] on machines
+  /// with multiple network interfaces.
+  static Future<String> resolveLanIp() async {
+    final interfaces = await NetworkInterface.list(
+      type: InternetAddressType.IPv4,
+      includeLinkLocal: false,
+    );
+    String? fallback;
+    for (final iface in interfaces) {
+      for (final addr in iface.addresses) {
+        final ip = addr.address;
+        if (ip.startsWith('127.') || ip.startsWith('169.254.')) continue;
+        if (BeaconUtils.isVirtualInterface(iface, ip)) continue;
+        if (ip.startsWith('192.168.') || ip.startsWith('10.')) return ip;
+        fallback ??= ip;
+      }
+    }
+    return fallback ?? '0.0.0.0';
+  }
+
   /// Creates a new Gossiper node.
   ///
   /// [name] is the unique node name (defaults to hostname if omitted).
@@ -345,22 +372,7 @@ class Gossiper {
   Future<String> _resolveLanIp() async {
     final nodeAddr = localNode().addr;
     if (nodeAddr != '0.0.0.0' && !nodeAddr.startsWith('127.')) return nodeAddr;
-
-    final interfaces = await NetworkInterface.list(
-      type: InternetAddressType.IPv4,
-      includeLinkLocal: false,
-    );
-    String? fallback;
-    for (final iface in interfaces) {
-      for (final addr in iface.addresses) {
-        final ip = addr.address;
-        if (ip.startsWith('127.') || ip.startsWith('169.254.')) continue;
-        if (BeaconUtils.isVirtualInterface(iface, ip)) continue;
-        if (ip.startsWith('192.168.') || ip.startsWith('10.')) return ip;
-        fallback ??= ip;
-      }
-    }
-    return fallback ?? '0.0.0.0';
+    return Gossiper.resolveLanIp();
   }
 
   void _stopBeacon() {

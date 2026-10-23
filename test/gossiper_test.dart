@@ -580,6 +580,23 @@ void main() {
     });
   });
 
+  group('Gossiper.resolveLanIp', () {
+    test('returns a non-empty string', () async {
+      final ip = await Gossiper.resolveLanIp();
+      expect(ip, isNotEmpty);
+    });
+
+    test('never returns a loopback address', () async {
+      final ip = await Gossiper.resolveLanIp();
+      expect(ip.startsWith('127.'), isFalse);
+    });
+
+    test('never returns a link-local address', () async {
+      final ip = await Gossiper.resolveLanIp();
+      expect(ip.startsWith('169.254.'), isFalse);
+    });
+  });
+
   group('MemberNode', () {
     test('address combines addr and port', () {
       const node = MemberNode(name: 'n', addr: '1.2.3.4', port: 5678);
