@@ -38,7 +38,7 @@ list, no service registry, no config files.
 
 ```yaml
 dependencies:
-  gossiper: ^0.4.0
+  gossiper: ^0.4.1
 ```
 
 This is a **Flutter FFI plugin**. Flutter's build system automatically bundles
