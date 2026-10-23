@@ -1,9 +1,11 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:ffi';
+import 'dart:io';
 
 import 'package:ffi/ffi.dart';
 import 'package:gossiper/gossiper.dart';
+import 'package:gossiper/src/beacon_utils.dart';
 import 'package:test/test.dart';
 
 // ---------------------------------------------------------------------------
@@ -362,15 +364,15 @@ void main() {
   });
 
   group('mDNS', () {
-    test('startDiscovery succeeds', () {
+    test('startDiscovery succeeds', () async {
       final g = Gossiper.withBindings(_fakeBindings());
-      expect(() => g.startDiscovery(), returnsNormally);
+      await g.startDiscovery();
       g.dispose();
     });
 
-    test('startDiscovery throws GossiperException on error', () {
+    test('startDiscovery throws GossiperException on mDNS error', () async {
       final g = Gossiper.withBindings(_fakeBindings(mdnsStartError: true));
-      expect(() => g.startDiscovery(), throwsA(isA<GossiperException>()));
+      await expectLater(g.startDiscovery(), throwsA(isA<GossiperException>()));
       g.dispose();
     });
 
@@ -384,6 +386,31 @@ void main() {
 
     test('discoverPeers returns empty list when no peers found', () {
       final g = Gossiper.withBindings(_fakeBindings(discoveredPeers: []));
+      expect(g.discoverPeers(), isEmpty);
+      g.dispose();
+    });
+
+    test('discoverPeers returns empty list when native returns null', () {
+      final bindings = _fakeBindings();
+      final nullBindings = GossiperBindings.fake(
+        memberlistCreate: bindings.memberlistCreate,
+        memberlistJoin: bindings.memberlistJoin,
+        memberlistMembers: bindings.memberlistMembers,
+        memberlistLocalNode: bindings.memberlistLocalNode,
+        memberlistNumMembers: bindings.memberlistNumMembers,
+        memberlistPollEvents: bindings.memberlistPollEvents,
+        memberlistLeave: bindings.memberlistLeave,
+        memberlistDestroy: bindings.memberlistDestroy,
+        memberlistStartMDNS: bindings.memberlistStartMDNS,
+        memberlistStopMDNS: bindings.memberlistStopMDNS,
+        memberlistDiscoverMDNS: (svc, timeout) => _cstr('null'),
+        memberlistBroadcast: bindings.memberlistBroadcast,
+        memberlistPollMessages: bindings.memberlistPollMessages,
+        memberlistSetReplayWindow: bindings.memberlistSetReplayWindow,
+        memberlistSetPersistPath: bindings.memberlistSetPersistPath,
+        freeString: bindings.freeString,
+      );
+      final g = Gossiper.withBindings(nullBindings);
       expect(g.discoverPeers(), isEmpty);
       g.dispose();
     });
@@ -404,6 +431,172 @@ void main() {
     });
   });
 
+  group('BeaconUtils.subnetBroadcast', () {
+    test('returns .255 broadcast for 192.168.x.x', () {
+      expect(BeaconUtils.subnetBroadcast('192.168.1.5'), equals('192.168.1.255'));
+    });
+
+    test('returns .255 broadcast for 10.x.x.x', () {
+      expect(BeaconUtils.subnetBroadcast('10.0.0.1'), equals('10.0.0.255'));
+    });
+
+    test('returns .255 broadcast for 172.x.x.x', () {
+      expect(BeaconUtils.subnetBroadcast('172.20.0.5'), equals('172.20.0.255'));
+    });
+
+    test('returns 255.255.255.255 for invalid IP', () {
+      expect(BeaconUtils.subnetBroadcast('not-an-ip'), equals('255.255.255.255'));
+    });
+
+    test('returns 255.255.255.255 for empty string', () {
+      expect(BeaconUtils.subnetBroadcast(''), equals('255.255.255.255'));
+    });
+  });
+
+  group('BeaconUtils.isVirtualInterface', () {
+    NetworkInterface iface(String name) => _FakeNetworkInterface(name);
+
+    test('docker0 is virtual', () {
+      expect(BeaconUtils.isVirtualInterface(iface('docker0'), '172.17.0.1'), isTrue);
+    });
+
+    test('br-abc123 is virtual', () {
+      expect(BeaconUtils.isVirtualInterface(iface('br-abc123'), '172.18.0.1'), isTrue);
+    });
+
+    test('veth12345 is virtual', () {
+      expect(BeaconUtils.isVirtualInterface(iface('veth12345'), '10.0.0.1'), isTrue);
+    });
+
+    test('vboxnet0 is virtual', () {
+      expect(BeaconUtils.isVirtualInterface(iface('vboxnet0'), '192.168.56.1'), isTrue);
+    });
+
+    test('vmnet8 is virtual', () {
+      expect(BeaconUtils.isVirtualInterface(iface('vmnet8'), '192.168.204.1'), isTrue);
+    });
+
+    test('virbr0 is virtual', () {
+      expect(BeaconUtils.isVirtualInterface(iface('virbr0'), '192.168.122.1'), isTrue);
+    });
+
+    test('172.16-31 range is virtual regardless of interface name', () {
+      expect(BeaconUtils.isVirtualInterface(iface('eth0'), '172.16.0.1'), isTrue);
+      expect(BeaconUtils.isVirtualInterface(iface('eth0'), '172.31.255.254'), isTrue);
+    });
+
+    test('172.15 and 172.32 are NOT virtual by range', () {
+      expect(BeaconUtils.isVirtualInterface(iface('eth0'), '172.15.0.1'), isFalse);
+      expect(BeaconUtils.isVirtualInterface(iface('eth0'), '172.32.0.1'), isFalse);
+    });
+
+    test('VirtualBox host-only 192.168.56.x is virtual', () {
+      expect(BeaconUtils.isVirtualInterface(iface('eth0'), '192.168.56.100'), isTrue);
+    });
+
+    test('KVM 192.168.122.x is virtual', () {
+      expect(BeaconUtils.isVirtualInterface(iface('eth0'), '192.168.122.50'), isTrue);
+    });
+
+    test('regular LAN addresses are not virtual', () {
+      expect(BeaconUtils.isVirtualInterface(iface('eth0'), '192.168.1.5'), isFalse);
+      expect(BeaconUtils.isVirtualInterface(iface('wlan0'), '10.0.0.50'), isFalse);
+      expect(BeaconUtils.isVirtualInterface(iface('en0'), '192.168.0.100'), isFalse);
+    });
+  });
+
+  group('BeaconUtils.processBeacon', () {
+    test('calls onJoin with remote addr when beacon is valid', () {
+      String? joined;
+      BeaconUtils.processBeacon(
+        payload: '{"type":"test_hello","addr":"192.168.1.10:7946"}',
+        selfAddr: '192.168.1.1:7946',
+        beaconType: 'test_hello',
+        numMembers: 1,
+        onJoin: (addr) => joined = addr,
+      );
+      expect(joined, equals('192.168.1.10:7946'));
+    });
+
+    test('ignores beacon from self', () {
+      String? joined;
+      BeaconUtils.processBeacon(
+        payload: '{"type":"test_hello","addr":"192.168.1.1:7946"}',
+        selfAddr: '192.168.1.1:7946',
+        beaconType: 'test_hello',
+        numMembers: 1,
+        onJoin: (addr) => joined = addr,
+      );
+      expect(joined, isNull);
+    });
+
+    test('ignores beacon with wrong type', () {
+      String? joined;
+      BeaconUtils.processBeacon(
+        payload: '{"type":"other_app","addr":"192.168.1.10:7946"}',
+        selfAddr: '192.168.1.1:7946',
+        beaconType: 'test_hello',
+        numMembers: 1,
+        onJoin: (addr) => joined = addr,
+      );
+      expect(joined, isNull);
+    });
+
+    test('does not join when already in a cluster (numMembers > 1)', () {
+      String? joined;
+      BeaconUtils.processBeacon(
+        payload: '{"type":"test_hello","addr":"192.168.1.10:7946"}',
+        selfAddr: '192.168.1.1:7946',
+        beaconType: 'test_hello',
+        numMembers: 3,
+        onJoin: (addr) => joined = addr,
+      );
+      expect(joined, isNull);
+    });
+
+    test('ignores malformed JSON without throwing', () {
+      expect(
+        () => BeaconUtils.processBeacon(
+          payload: 'not-json',
+          selfAddr: '192.168.1.1:7946',
+          beaconType: 'test_hello',
+          numMembers: 1,
+          onJoin: (_) {},
+        ),
+        returnsNormally,
+      );
+    });
+
+    test('ignores beacon missing addr field', () {
+      String? joined;
+      BeaconUtils.processBeacon(
+        payload: '{"type":"test_hello"}',
+        selfAddr: '192.168.1.1:7946',
+        beaconType: 'test_hello',
+        numMembers: 1,
+        onJoin: (addr) => joined = addr,
+      );
+      expect(joined, isNull);
+    });
+  });
+
+  group('Gossiper.resolveLanIp', () {
+    test('returns a non-empty string', () async {
+      final ip = await Gossiper.resolveLanIp();
+      expect(ip, isNotEmpty);
+    });
+
+    test('never returns a loopback address', () async {
+      final ip = await Gossiper.resolveLanIp();
+      expect(ip.startsWith('127.'), isFalse);
+    });
+
+    test('never returns a link-local address', () async {
+      final ip = await Gossiper.resolveLanIp();
+      expect(ip.startsWith('169.254.'), isFalse);
+    });
+  });
+
   group('MemberNode', () {
     test('address combines addr and port', () {
       const node = MemberNode(name: 'n', addr: '1.2.3.4', port: 5678);
@@ -416,4 +609,21 @@ void main() {
       expect(node.toString(), contains('10.0.0.1:7946'));
     });
   });
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+class _FakeNetworkInterface implements NetworkInterface {
+  _FakeNetworkInterface(this.name);
+
+  @override
+  final String name;
+
+  @override
+  int get index => 0;
+
+  @override
+  List<Never> get addresses => const [];
 }
