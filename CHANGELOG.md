@@ -1,3 +1,7 @@
+## 0.4.1
+
+- **Bug fix** — `onJoin` no longer silenced by `processBeacon`'s `catch` block; only JSON parse errors are swallowed now, so `GossiperException` from `join()` propagates correctly.
+
 ## 0.4.0
 
 - **Beacon discovery** — `startDiscovery()` now runs UDP broadcast alongside mDNS. Nodes automatically join the cluster as soon as any peer is found, with no extra API calls needed.
