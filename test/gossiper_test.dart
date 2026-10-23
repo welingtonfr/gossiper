@@ -608,5 +608,5 @@ class _FakeNetworkInterface implements NetworkInterface {
   int get index => 0;
 
   @override
-  List<InternetAddress> get addresses => [];
+  List<Never> get addresses => const [];
 }

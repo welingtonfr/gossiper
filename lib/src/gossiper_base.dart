@@ -119,7 +119,9 @@ class Gossiper {
     final ptr = _bindings.memberlistMembers(_handle);
     final json = ptr.cast<Utf8>().toDartString();
     _bindings.freeString(ptr.cast());
-    return (jsonDecode(json) as List).map((e) => MemberNode.fromJson(e as Map<String, dynamic>)).toList();
+    final decoded = jsonDecode(json);
+    if (decoded is! List) return [];
+    return decoded.map((e) => MemberNode.fromJson(e as Map<String, dynamic>)).toList();
   }
 
   /// Returns this node's own info.
@@ -163,7 +165,9 @@ class Gossiper {
     final json = ptr.cast<Utf8>().toDartString();
     _bindings.freeString(ptr.cast());
 
-    for (final item in jsonDecode(json) as List) {
+    final decoded = jsonDecode(json);
+    if (decoded is! List) return;
+    for (final item in decoded) {
       final map = item as Map<String, dynamic>;
       final type = switch (map['type'] as int) {
         0 => NodeEventType.join,
@@ -246,7 +250,9 @@ class Gossiper {
     final json = ptr.cast<Utf8>().toDartString();
     _bindings.freeString(ptr.cast());
 
-    for (final msg in jsonDecode(json) as List) {
+    final decoded = jsonDecode(json);
+    if (decoded is! List) return;
+    for (final msg in decoded) {
       _messagesController.add(msg as String);
     }
   }
