@@ -1,3 +1,11 @@
+## 0.4.0
+
+- **Beacon discovery** — `startDiscovery()` now runs UDP broadcast alongside mDNS. Nodes automatically join the cluster as soon as any peer is found, with no extra API calls needed.
+- `startDiscovery()` signature changed to `Future<void>` (was `void`); `beaconPort`, `beaconInterval`, and `beaconType` parameters added.
+- New static method `Gossiper.resolveLanIp()` — resolves the best LAN IPv4 address, skipping loopback, link-local, and known virtual adapter ranges (Docker, WSL2, VirtualBox, VMware, KVM/libvirt).
+- **Bug fix** — `discoverPeers`, `members`, `events`, and `messages` no longer throw when the native layer returns JSON `null` instead of `[]`.
+- `BeaconUtils` extracted as an internal utility class (`subnetBroadcast`, `isVirtualInterface`, `processBeacon`).
+
 ## 0.3.0
 
 - **Message replay** — when a node reconnects after being offline, it automatically receives messages it missed (up to a configurable window). Each broadcast message is assigned a UUID and timestamp; `LocalState`/`MergeRemoteState` sync the in-memory log between nodes on connect/reconnect. Deduplication by UUID prevents duplicate delivery.
