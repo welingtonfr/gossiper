@@ -390,6 +390,31 @@ void main() {
       g.dispose();
     });
 
+    test('discoverPeers returns empty list when native returns null', () {
+      final bindings = _fakeBindings();
+      final nullBindings = GossiperBindings.fake(
+        memberlistCreate: bindings.memberlistCreate,
+        memberlistJoin: bindings.memberlistJoin,
+        memberlistMembers: bindings.memberlistMembers,
+        memberlistLocalNode: bindings.memberlistLocalNode,
+        memberlistNumMembers: bindings.memberlistNumMembers,
+        memberlistPollEvents: bindings.memberlistPollEvents,
+        memberlistLeave: bindings.memberlistLeave,
+        memberlistDestroy: bindings.memberlistDestroy,
+        memberlistStartMDNS: bindings.memberlistStartMDNS,
+        memberlistStopMDNS: bindings.memberlistStopMDNS,
+        memberlistDiscoverMDNS: (svc, timeout) => _cstr('null'),
+        memberlistBroadcast: bindings.memberlistBroadcast,
+        memberlistPollMessages: bindings.memberlistPollMessages,
+        memberlistSetReplayWindow: bindings.memberlistSetReplayWindow,
+        memberlistSetPersistPath: bindings.memberlistSetPersistPath,
+        freeString: bindings.freeString,
+      );
+      final g = Gossiper.withBindings(nullBindings);
+      expect(g.discoverPeers(), isEmpty);
+      g.dispose();
+    });
+
     test('joinViaDiscovery calls join with discovered addresses', () {
       final g = Gossiper.withBindings(_fakeBindings(
         discoveredPeers: ['192.168.1.5:7946'],

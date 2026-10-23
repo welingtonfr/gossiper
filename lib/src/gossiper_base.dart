@@ -386,7 +386,8 @@ class Gossiper {
       final ptr = _bindings.memberlistDiscoverMDNS(svcPtr.cast(), timeout.inMilliseconds);
       final json = ptr.cast<Utf8>().toDartString();
       _bindings.freeString(ptr.cast());
-      return (jsonDecode(json) as List).cast<String>();
+      final decoded = jsonDecode(json);
+      return decoded is List ? decoded.cast<String>() : [];
     } finally {
       calloc.free(svcPtr);
     }
