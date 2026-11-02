@@ -1,34 +1,38 @@
 # Gossiper
 
-Dart gossip-protocol library that wraps **[hashicorp/memberlist](https://github.com/hashicorp/memberlist)** (Go) via CGO shared library + Dart FFI, with **automatic peer discovery via mDNS** (`hashicorp/mdns`).
+Dart gossip-protocol library that wraps **[hashicorp/memberlist](https://github.com/hashicorp/memberlist)** (Go) via CGO shared library + Dart FFI, with **pluggable peer discovery** (built-in mDNS via `hashicorp/mdns` and UDP beacon) and **pluggable message storage**.
 
 ---
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────┐
-│  Dart (consumer)                                    │
-│  ┌──────────────────────────────────────────────┐  │
-│  │  lib/gossiper.dart           (public API)    │  │
-│  │  lib/src/gossiper_base.dart  (Gossiper class)│  │
-│  │  lib/src/gossiper_bindings.dart  (FFI layer) │  │
-│  └──────────────────┬───────────────────────────┘  │
-│                     │ dart:ffi                      │
-└─────────────────────┼───────────────────────────────┘
+┌──────────────────────────────────────────────────────────┐
+│  Dart (consumer)                                         │
+│  ┌────────────────────────────────────────────────────┐  │
+│  │  lib/gossiper.dart            (public API)         │  │
+│  │  lib/src/gossiper_base.dart   (Gossiper class)     │  │
+│  │  lib/src/domain/contracts/    (interfaces)         │  │
+│  │  lib/src/discovery/           (built-in discovery) │  │
+│  │  lib/src/storage/             (built-in stores)    │  │
+│  │  lib/src/gossiper_bindings.dart  (FFI layer)       │  │
+│  └──────────────────┬─────────────────────────────────┘  │
+│                     │ dart:ffi                           │
+└─────────────────────┼────────────────────────────────────┘
                       │
-             gossiper.dll / libgossiper.so / .dylib
+             gossiper.dll / libgossiper.so
                       │
-┌─────────────────────┼───────────────────────────────┐
-│  Go (native/memberlist_wrapper/wrapper.go)           │
-│  ┌──────────────────┴───────────────────────────┐   │
-│  │  CGO exports (C-compatible function sigs)    │   │
-│  │  ├── memberlist core  (create/join/leave/…)  │   │
-│  │  └── mDNS             (start/stop/discover)  │   │
-│  └──────────────────────────────────────────────┘   │
-│           ↓                         ↓               │
-│  hashicorp/memberlist       hashicorp/mdns           │
-└──────────────────────────────────────────────────────┘
+┌─────────────────────┼────────────────────────────────────┐
+│  Go (native/memberlist_wrapper/src/)                     │
+│  ┌──────────────────┴─────────────────────────────────┐  │
+│  │  CGO exports (C-compatible function sigs)          │  │
+│  │  ├── memberlist core  (create/join/leave/…)        │  │
+│  │  ├── messages         (broadcast/poll/replay log)  │  │
+│  │  └── mDNS             (start/stop/discover)        │  │
+│  └────────────────────────────────────────────────────┘  │
+│           ↓                         ↓                    │
+│  hashicorp/memberlist       hashicorp/mdns               │
+└──────────────────────────────────────────────────────────┘
 ```
 
 **Key design choices:**
@@ -38,7 +42,17 @@ Dart gossip-protocol library that wraps **[hashicorp/memberlist](https://github.
 | JSON over the FFI boundary | Avoids complex C structs; Go marshals, Dart unmarshals |
 | `int64_t` handles | Safe opaque reference across the CGO boundary |
 | Event polling via timer | Avoids CGO callback complexity; 500 ms default is fine for gossip |
-| mDNS for discovery | Zero-config LAN clustering; no seed list required |
+| Discovery as `DiscoveryStrategy` list | Users plug their own mechanism; several run at once |
+| Go never touches the filesystem | Go keeps only the in-memory replay log; persistence is the Dart `MessageStore`'s job |
+
+### Layers inside `lib/src/`
+
+| Folder | Holds | Rule |
+|---|---|---|
+| `domain/contracts/` | public interfaces users implement: `DiscoveryStrategy`, `DiscoveryContext`, `AutoJoinRule`, `MessageStore` | no FFI, no `dart:io` |
+| `domain/entities/`, `vos/`, `exceptions/` | `MemberNode`, `NodeEvent`, `Message`, `NodeEventType`, `GossiperException` | plain data |
+| `discovery/` | built-in strategies `MdnsDiscovery`, `BeaconDiscovery` | may use FFI via the internal `NativeDiscoveryContext` (not exported) |
+| `storage/` | built-in `JsonLinesMessageStore` | `dart:io` only |
 
 ---
 
@@ -51,21 +65,31 @@ gossiper/
 ├── lib/
 │   ├── gossiper.dart                    re-exports public symbols
 │   └── src/
-│       ├── gossiper_base.dart           Gossiper, MemberNode, NodeEvent
-│       └── gossiper_bindings.dart       raw FFI typedefs + loader
-├── windows/
-│   └── CMakeLists.txt                   bundles blobs/windows/gossiper.dll
-├── linux/
-│   └── CMakeLists.txt                   bundles blobs/linux/libgossiper.so
-├── native/
-│   └── memberlist_wrapper/
-│       ├── wrapper.go                   CGO exports for memberlist + mDNS
-│       ├── go.mod                       Go module (memberlist + mdns)
-│       ├── build.ps1                    Windows build → blobs/windows/
-│       └── Makefile                     Linux build → blobs/linux/
+│       ├── gossiper_base.dart           Gossiper (+ private _GossiperDiscoveryContext)
+│       ├── gossiper_bindings.dart       raw FFI typedefs + loader
+│       ├── beacon_utils.dart            subnetBroadcast, isVirtualInterface, parseBeacon
+│       ├── domain/
+│       │   ├── contracts/               discovery_strategy, discovery_context,
+│       │   │                            auto_join_rule, message_store
+│       │   ├── entities/                member_node, node_event, message
+│       │   ├── vos/                     node_event_type
+│       │   └── exceptions/              gossiper_exception
+│       ├── discovery/                   mdns_discovery, beacon_discovery,
+│       │                                native_discovery_context (internal)
+│       └── storage/                     json_lines_message_store
+├── windows/CMakeLists.txt               bundles blobs/windows/gossiper.dll
+├── linux/CMakeLists.txt                 bundles blobs/linux/libgossiper.so
+├── native/memberlist_wrapper/
+│   ├── src/
+│   │   ├── wrapper.go                   handle registry, FreeString
+│   │   ├── delegate.go                  memberlist delegate: events, replay log
+│   │   ├── exports_memberlist.go        core + message exports
+│   │   ├── exports_mdns.go              mDNS exports
+│   │   └── helpers.go                   setErr, localIPs, newUUID
+│   ├── go.mod                           Go module (memberlist + mdns)
+│   ├── build.ps1                        Windows build → blobs/windows/
+│   └── Makefile                         Linux build → blobs/linux/
 ├── blobs/                               compiled .dll/.so (gitignored, built by CI)
-│   ├── windows/gossiper.dll
-│   └── linux/libgossiper.so
 ├── example/gossiper_example.dart
 └── test/gossiper_test.dart
 ```
@@ -80,7 +104,6 @@ gossiper/
 |---|---|
 | Windows | Go 1.21+, [tdm-gcc](https://jmeubank.github.io/tdm-gcc/) or MSYS2 mingw-w64 |
 | Linux | Go 1.21+, gcc |
-| macOS | Go 1.21+, Xcode CLT (`xcode-select --install`) |
 
 ### Windows
 
@@ -91,16 +114,19 @@ go mod tidy
 # → blobs\windows\gossiper.dll
 ```
 
-### Linux / macOS
+### Linux
 
 ```bash
 cd native/memberlist_wrapper
-make linux   # or: make macos
+make linux
+# → blobs/linux/libgossiper.so
 ```
 
 ### Place the library
 
-The Dart runtime searches for the `.dll`/`.so`/`.dylib` next to the executable (or wherever the OS dynamic-linker looks). For development, copy the built file beside your script or pass `libPath:` to `Gossiper.create`.
+`Gossiper.create` opens `gossiper.dll` (Windows) or `libgossiper.so` (other platforms) from the OS dynamic-linker search path. In a Flutter app the plugin bundles it automatically; for plain Dart, put it beside the executable or on `LD_LIBRARY_PATH`.
+
+**Any change to an exported Go signature requires rebuilding the library** — an old `.so`/`.dll` with a new Dart side fails at load (missing symbol) or, worse, at runtime (changed return type).
 
 ---
 
@@ -109,20 +135,30 @@ The Dart runtime searches for the `.dll`/`.so`/`.dylib` next to the executable (
 ```dart
 // Create a node
 final gossiper = Gossiper.create(
-  name: 'node-1',       // optional, defaults to hostname
+  name: 'node-1',                 // optional, defaults to hostname
   bindAddr: '0.0.0.0',
   bindPort: 7946,
-  libPath: 'gossiper.dll', // optional override
+  replayMaxEntries: 500,          // in-memory replay log size
+  replayWindow: Duration(hours: 24),
+  messageStore: JsonLinesMessageStore('gossiper.log'), // optional, saves every message
 );
 
-// Advertise on LAN
-gossiper.startDiscovery(serviceName: '_gossiper._tcp');
+// Discovery — default mDNS + beacon; first call loads the store history
+await gossiper.startDiscovery();
 
-// Auto-discover peers and join
-final contacted = gossiper.joinViaDiscovery();
+// …or any combination of strategies
+await gossiper.startDiscovery([
+  MdnsDiscovery(serviceName: '_gossiper._tcp'),        // autoJoin: AutoJoinRules.always
+  BeaconDiscovery(beaconType: 'gossiper_hello'),       // autoJoin: AutoJoinRules.whenAlone
+]);
+gossiper.stopDiscovery();
 
 // Or join with explicit addresses
 gossiper.join(['192.168.1.5:7946', '192.168.1.6:7946']);
+
+// Messages
+final sent = gossiper.broadcast('{"op":"ping"}');      // Message(id, data, at)
+gossiper.messages().listen((m) => print(m.data));      // Stream<Message>
 
 // Stream of join/leave/update events
 gossiper.events().listen((e) => print('${e.type.name}: ${e.node}'));
@@ -139,34 +175,49 @@ gossiper.dispose();
 
 ---
 
-## mDNS discovery
+## Discovery
 
-mDNS uses multicast UDP 224.0.0.251:5353. All nodes on the same L2 segment
-hear each other automatically — no seed list, no config file, no service registry.
+`startDiscovery([List<DiscoveryStrategy>?])` (default `[MdnsDiscovery(), BeaconDiscovery()]`)
+stops any running strategies, loads the store history on the first call, builds one
+`DiscoveryContext` (`lanIp`, `gossipPort`, `selfAddr`, `numMembers`, `join`) and
+calls `start(ctx)` on each in order. If one throws, those already started are
+stopped and the error is rethrown.
 
-Flow:
+| Strategy | start | Auto-join |
+|---|---|---|
+| `MdnsDiscovery` | `MemberlistStartMDNS`, then a blocking `MemberlistDiscoverMDNS` lookup (`lookupTimeout`, 2 s) | each found peer passing `autoJoin` (default `always`); join errors swallowed |
+| `BeaconDiscovery` | binds UDP `port` (7947), broadcasts `{"type","addr"}` every `interval`; socket failure is non-fatal | each heard beacon passing `autoJoin` (default `whenAlone`) |
+
+`autoJoin: null` disables automatic joining (mDNS then skips the lookup).
+`MdnsDiscovery.discoverPeers()` / `joinPeers()` are manual, post-start helpers;
+`joinPeers` ignores `autoJoin`.
+
+To add a built-in strategy: implement `DiscoveryStrategy` in `lib/src/discovery/`,
+export it from `lib/gossiper.dart`. If it needs FFI, require
+`NativeDiscoveryContext` (see `MdnsDiscovery.start`).
+
+---
+
+## Messages and storage
+
+Go owns the **in-memory replay log** (`msgLog` in `delegate.go`): UUID dedup in
+`NotifyMsg`, replay via `LocalState` / `MergeRemoteState`, pruning by
+`maxLog` / `logWindow`. It never reads or writes files.
+
+Persistence flow (Dart, `gossiper_base.dart`) — zero conf, no public calls:
 
 ```
-Node A starts             Node B starts
-  │                         │
-  ├─ startDiscovery()        ├─ startDiscovery()
-  │   registers              │   registers
-  │   _gossiper._tcp          │   _gossiper._tcp
-  │                         │
-  ├─ joinViaDiscovery()     ├─ joinViaDiscovery()
-  │   ← mDNS query →         │   ← mDNS query →
-  │   finds B                │   finds A
-  │   memberlist.Join(B)     │   memberlist.Join(A)
-  │                         │
-  └─ gossip starts ──────────┘
+broadcast(data)          → MemberlistBroadcast returns {id,data,at} → store.saveMessage (not awaited)
+_pollMessages()          → each Message → store.saveMessage + messages() stream
+1st startDiscovery()     → _loadHistory(): store.deleteBefore(cutoff)
+                           + store.getMessagesSince(cutoff, limit: replayMaxEntries)
+                           → MemberlistRestoreLog (seeded entries are not delivered; they are
+                             replayed to peers via LocalState and dedup MergeRemoteState)
 ```
 
-`discoverPeers()` blocks for up to `timeout` — run it in an isolate if you need
-non-blocking behaviour:
+`cutoff = now - replayWindow`. Retrying failed sends (outbox) is the client's job,
+not the library's. `join()` alone does not load the history.
 
-```dart
-final peers = await Isolate.run(() => gossiper.discoverPeers(timeout: Duration(seconds: 3)));
-```
 
 ---
 
@@ -174,17 +225,19 @@ final peers = await Isolate.run(() => gossiper.discoverPeers(timeout: Duration(s
 
 Follow this three-step pattern to keep the layers in sync.
 
-### 1. Go — add a CGO export in `wrapper.go`
+### 1. Go — add a CGO export in `src/exports_memberlist.go` (or `src/exports_mdns.go`)
 
 ```go
 // MemberlistFoo does X.
 //
 //export MemberlistFoo
 func MemberlistFoo(handle C.int64_t, ...) C.int {
-    m := lookup(handle)
+    d := lookupDelegate(handle)   // or lookup(handle) for the *memberlist.Memberlist
     ...
 }
 ```
+
+Returned strings are `C.CString(...)` and must be freed by Dart via `FreeString`.
 
 ### 2. Dart — add typedefs in `gossiper_bindings.dart`
 
@@ -201,7 +254,8 @@ memberlistFoo: lib
     .asFunction(),
 ```
 
-Add the field to `GossiperBindings._({...})` and the constructor.
+Add the field to `GossiperBindings._({...})` and the constructor, and the
+parameter to `GossiperBindings.fake(...)` (and `_fakeBindings` in the tests).
 
 ### 3. Dart — expose it in `gossiper_base.dart`
 
@@ -218,12 +272,11 @@ dart pub get
 dart test
 ```
 
-Integration tests that spin up real nodes require the compiled `.dll`/`.so` in the path — set the `GOSSIPER_LIB` env var or pass `libPath:` directly.
+Unit tests use `GossiperBindings.fake(...)` + `Gossiper.withBindings(bindings, messageStore: ...)` — no native library needed. When adding a binding, add it to `_fakeBindings` in `test/gossiper_test.dart` and to every `GossiperBindings.fake(...)` copy there.
 
 ---
 
 ## Roadmap
 
 - [ ] User data / metadata per node (memberlist `Delegate`)
-- [ ] Pre-built blobs in CI (GitHub Actions matrix: windows/linux/macos)
-- [ ] Flutter plugin wrapper
+- [ ] macOS / Android / iOS support

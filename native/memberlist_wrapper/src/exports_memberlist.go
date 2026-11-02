@@ -173,14 +173,15 @@ func MemberlistDestroy(handle C.int64_t) {
 //
 // data is an opaque byte string; gossiper does not interpret it — use JSON,
 // Protobuf, or any encoding your application chooses.
-// Returns 0 on success, -1 on error.
+// Returns the created log entry as JSON ({"id","data","at"}), or NULL on error.
+// Caller must call FreeString on the returned pointer.
 //
 //export MemberlistBroadcast
-func MemberlistBroadcast(handle C.int64_t, dataC *C.char, errOut **C.char) C.int {
+func MemberlistBroadcast(handle C.int64_t, dataC *C.char, errOut **C.char) *C.char {
 	d := lookupDelegate(handle)
 	if d == nil {
 		setErr(errOut, "invalid handle")
-		return -1
+		return nil
 	}
 	entry := logEntry{
 		ID:   newUUID(),
@@ -190,11 +191,10 @@ func MemberlistBroadcast(handle C.int64_t, dataC *C.char, errOut **C.char) C.int
 	b, _ := json.Marshal(entry)
 	d.mu.Lock()
 	d.msgLog = append(d.msgLog, entry)
-	d.appendToDisk(entry)
 	d.pruneLog()
 	d.mu.Unlock()
 	d.broadcasts.QueueBroadcast(&simpleBroadcast{b})
-	return 0
+	return C.CString(string(b))
 }
 
 // MemberlistSetReplayWindow configures the in-memory replay log.
@@ -218,25 +218,32 @@ func MemberlistSetReplayWindow(handle C.int64_t, maxEntries C.int, windowHours C
 	}
 }
 
-// MemberlistSetPersistPath configures a file path for durable message log storage.
-// On call, the existing file (if any) is loaded and merged into the in-memory log,
-// so a node that restarts automatically recovers its message history before joining.
-// Pass an empty string to disable persistence.
+// MemberlistRestoreLog seeds the replay log with previously persisted entries
+// (JSON array of {"id","data","at"}).
+// Restored entries are not delivered to the app; they are replayed to peers
+// via LocalState and used to dedup what peers send back.
+// Returns 0 on success, -1 on error.
 //
-//export MemberlistSetPersistPath
-func MemberlistSetPersistPath(handle C.int64_t, pathC *C.char) {
+//export MemberlistRestoreLog
+func MemberlistRestoreLog(handle C.int64_t, entriesJson *C.char, errOut **C.char) C.int {
 	d := lookupDelegate(handle)
 	if d == nil {
-		return
+		setErr(errOut, "invalid handle")
+		return -1
+	}
+	var entries []logEntry
+	if err := json.Unmarshal([]byte(C.GoString(entriesJson)), &entries); err != nil {
+		setErr(errOut, "invalid entries JSON: "+err.Error())
+		return -1
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	d.persistPath = C.GoString(pathC)
-	d.loadFromDisk()
+	d.restoreLog(entries)
+	return 0
 }
 
 // MemberlistPollMessages drains messages received from other cluster nodes.
-// Returns a JSON array of raw message strings.
+// Returns a JSON array of {"id","data","at"} objects.
 // Caller must call FreeString on the returned pointer.
 //
 //export MemberlistPollMessages

@@ -28,6 +28,8 @@ GossiperBindings _fakeBindings({
   bool createError = false,
   bool mdnsStartError = false,
   bool broadcastError = false,
+  List<List<String>>? joinCalls,
+  List<String>? restoredLogs,
 }) {
   final eventsQueue = [...pendingEvents];
   final messagesQueue = [...pendingMessages];
@@ -40,7 +42,10 @@ GossiperBindings _fakeBindings({
       }
       return handle;
     },
-    memberlistJoin: (h, addrsJson, errOut) => joinResult,
+    memberlistJoin: (h, addrsJson, errOut) {
+      joinCalls?.add((jsonDecode(addrsJson.toDartString()) as List).cast<String>());
+      return joinResult;
+    },
     memberlistMembers: (h) {
       final all = [
         {'name': localName, 'addr': localAddr, 'port': localPort},
@@ -77,18 +82,24 @@ GossiperBindings _fakeBindings({
     memberlistBroadcast: (h, data, errOut) {
       if (broadcastError) {
         if (errOut != nullptr) errOut.value = _cstr('simulated broadcast error');
-        return -1;
+        return nullptr;
       }
-      return 0;
+      return _cstr(jsonEncode({'id': 'sent-1', 'data': data.toDartString(), 'at': 42}));
     },
     memberlistPollMessages: (h) {
       if (messagesQueue.isEmpty) return _cstr('[]');
-      final batch = [...messagesQueue];
+      final batch = [
+        for (final (i, m) in messagesQueue.indexed) {'id': 'msg-$i', 'data': m, 'at': i},
+      ];
       messagesQueue.clear();
       return _cstr(jsonEncode(batch));
     },
     memberlistSetReplayWindow: (h, maxEntries, windowHours) {},
-    memberlistSetPersistPath: (h, path) {},
+    memberlistRestoreLog: (h, entriesJson, errOut) {
+      restoredLogs?.add(entriesJson.toDartString());
+      return 0;
+    },
+
     freeString: (ptr) => calloc.free(ptr),
   );
 }
@@ -218,9 +229,12 @@ void main() {
   });
 
   group('broadcast', () {
-    test('succeeds without error', () {
+    test('returns the sent message', () {
       final g = Gossiper.withBindings(_fakeBindings());
-      expect(() => g.broadcast('{"op":"ping"}'), returnsNormally);
+      final m = g.broadcast('{"op":"ping"}');
+      expect(m.id, equals('sent-1'));
+      expect(m.data, equals('{"op":"ping"}'));
+      expect(m.at, equals(42));
       g.dispose();
     });
 
@@ -237,7 +251,7 @@ void main() {
         pendingMessages: ['{"op":"set","key":"x","val":1}', 'hello'],
       ));
 
-      final received = <String>[];
+      final received = <Message>[];
       final sub = g.messages(pollInterval: const Duration(milliseconds: 50)).listen(received.add);
 
       await Future.delayed(const Duration(milliseconds: 200));
@@ -245,13 +259,14 @@ void main() {
       g.dispose();
 
       expect(received, hasLength(2));
-      expect(received[0], '{"op":"set","key":"x","val":1}');
-      expect(received[1], 'hello');
+      expect(received[0].data, '{"op":"set","key":"x","val":1}');
+      expect(received[0].id, 'msg-0');
+      expect(received[1].data, 'hello');
     });
 
     test('emits nothing when no messages pending', () async {
       final g = Gossiper.withBindings(_fakeBindings());
-      final received = <String>[];
+      final received = <Message>[];
       final sub = g.messages(pollInterval: const Duration(milliseconds: 50)).listen(received.add);
 
       await Future.delayed(const Duration(milliseconds: 150));
@@ -270,7 +285,7 @@ void main() {
       ));
 
       final events = <NodeEvent>[];
-      final msgs = <String>[];
+      final msgs = <Message>[];
       final s1 = g.events(pollInterval: const Duration(milliseconds: 50)).listen(events.add);
       final s2 = g.messages(pollInterval: const Duration(milliseconds: 50)).listen(msgs.add);
 
@@ -281,44 +296,161 @@ void main() {
 
       expect(events, hasLength(1));
       expect(msgs, hasLength(1));
-      expect(msgs.first, 'ping');
+      expect(msgs.first.data, 'ping');
     });
   });
 
-  group('setPersistPath', () {
-    test('completes without error', () {
-      final g = Gossiper.withBindings(_fakeBindings());
-      expect(() => g.setPersistPath('/tmp/gossiper_test.log'), returnsNormally);
+  group('message store', () {
+    final noDiscovery = <DiscoveryStrategy>[];
+
+    test('broadcast saves the sent message', () async {
+      final store = _FakeMessageStore();
+      final g = Gossiper.withBindings(_fakeBindings(), messageStore: store);
+      final sent = g.broadcast('hello');
+      await Future<void>.delayed(Duration.zero);
+      expect(store.messages.single.id, equals(sent.id));
+      expect(store.messages.single.data, equals('hello'));
       g.dispose();
     });
 
-    test('create applies persistPath', () {
-      var capturedPath = '';
-      final bindings = _fakeBindings();
-      final b = GossiperBindings.fake(
-        memberlistCreate: bindings.memberlistCreate,
-        memberlistJoin: bindings.memberlistJoin,
-        memberlistMembers: bindings.memberlistMembers,
-        memberlistLocalNode: bindings.memberlistLocalNode,
-        memberlistNumMembers: bindings.memberlistNumMembers,
-        memberlistPollEvents: bindings.memberlistPollEvents,
-        memberlistLeave: bindings.memberlistLeave,
-        memberlistDestroy: bindings.memberlistDestroy,
-        memberlistStartMDNS: bindings.memberlistStartMDNS,
-        memberlistStopMDNS: bindings.memberlistStopMDNS,
-        memberlistDiscoverMDNS: bindings.memberlistDiscoverMDNS,
-        memberlistBroadcast: bindings.memberlistBroadcast,
-        memberlistPollMessages: bindings.memberlistPollMessages,
-        memberlistSetReplayWindow: bindings.memberlistSetReplayWindow,
-        memberlistSetPersistPath: (h, path) {
-          capturedPath = path.cast<Utf8>().toDartString();
-        },
-        freeString: bindings.freeString,
+    test('received messages are saved', () async {
+      final store = _FakeMessageStore();
+      final g = Gossiper.withBindings(
+        _fakeBindings(pendingMessages: ['a', 'b']),
+        messageStore: store,
       );
-      final g = Gossiper.withBindings(b);
-      g.setPersistPath('/data/gossiper.log');
-      expect(capturedPath, equals('/data/gossiper.log'));
+      final sub = g.messages(pollInterval: const Duration(milliseconds: 20)).listen((_) {});
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+      await sub.cancel();
+      expect(store.messages.map((m) => m.data), equals(['a', 'b']));
       g.dispose();
+    });
+
+    test('works without a store', () async {
+      final g = Gossiper.withBindings(_fakeBindings(pendingMessages: ['a']));
+      expect(() => g.broadcast('x'), returnsNormally);
+      await expectLater(g.startDiscovery(noDiscovery), completes);
+      g.dispose();
+    });
+
+    test('first startDiscovery loads history within the replay window', () async {
+      final now = DateTime.now().millisecondsSinceEpoch;
+      final store = _FakeMessageStore([
+        Message(id: 'old', data: 'x', at: now - const Duration(hours: 25).inMilliseconds),
+        Message(id: 'new', data: 'y', at: now - 1000),
+      ]);
+      final restored = <String>[];
+      final g = Gossiper.withBindings(_fakeBindings(restoredLogs: restored), messageStore: store);
+      await g.startDiscovery(noDiscovery);
+      final ids = (jsonDecode(restored.single) as List).map((e) => e['id']).toList();
+      expect(ids, equals(['new']));
+      expect(store.messages.map((m) => m.id), equals(['new']), reason: 'old one pruned');
+      g.dispose();
+    });
+
+    test('history load respects replayMaxEntries', () async {
+      final now = DateTime.now().millisecondsSinceEpoch;
+      final store = _FakeMessageStore([
+        for (var i = 0; i < 5; i++) Message(id: 'm$i', data: '', at: now - 5000 + i),
+      ]);
+      final restored = <String>[];
+      final g = Gossiper.withBindings(_fakeBindings(restoredLogs: restored), messageStore: store);
+      g.setReplayWindow(maxEntries: 2);
+      await g.startDiscovery(noDiscovery);
+      final ids = (jsonDecode(restored.single) as List).map((e) => e['id']).toList();
+      expect(ids, equals(['m3', 'm4']));
+      g.dispose();
+    });
+
+    test('history is loaded before any strategy starts', () async {
+      final now = DateTime.now().millisecondsSinceEpoch;
+      final restored = <String>[];
+      final strategy = _FakeStrategy();
+      var restoredBeforeStart = false;
+      final g = Gossiper.withBindings(
+        _fakeBindings(restoredLogs: restored),
+        messageStore: _FakeMessageStore([Message(id: 'a', data: '', at: now)]),
+      );
+      strategy.onStart = () => restoredBeforeStart = restored.isNotEmpty;
+      await g.startDiscovery([strategy]);
+      expect(restoredBeforeStart, isTrue);
+      g.dispose();
+    });
+
+    test('history is loaded only on the first startDiscovery', () async {
+      final now = DateTime.now().millisecondsSinceEpoch;
+      final restored = <String>[];
+      final g = Gossiper.withBindings(
+        _fakeBindings(restoredLogs: restored),
+        messageStore: _FakeMessageStore([Message(id: 'a', data: '', at: now)]),
+      );
+      await g.startDiscovery(noDiscovery);
+      await g.startDiscovery(noDiscovery);
+      expect(restored, hasLength(1));
+      g.dispose();
+    });
+
+    test('empty store does not call native restore', () async {
+      final restored = <String>[];
+      final g = Gossiper.withBindings(
+        _fakeBindings(restoredLogs: restored),
+        messageStore: _FakeMessageStore(),
+      );
+      await g.startDiscovery(noDiscovery);
+      expect(restored, isEmpty);
+      g.dispose();
+    });
+  });
+
+  group('JsonLinesMessageStore', () {
+    late Directory dir;
+    late String path;
+
+    setUp(() {
+      dir = Directory.systemTemp.createTempSync('gossiper_store_');
+      path = '${dir.path}/sub/log.jsonl';
+    });
+    tearDown(() => dir.deleteSync(recursive: true));
+
+    test('returns empty list when file does not exist', () async {
+      expect(await JsonLinesMessageStore(path).getMessagesSince(0), isEmpty);
+    });
+
+    test('saves and reads back messages oldest first, deduped by id', () async {
+      final store = JsonLinesMessageStore(path);
+      await Future.wait([
+        store.saveMessage(const Message(id: 'b', data: '2', at: 20)),
+        store.saveMessage(const Message(id: 'a', data: '1', at: 10)),
+        store.saveMessage(const Message(id: 'a', data: '1', at: 10)),
+      ]);
+      final all = await store.getMessagesSince(0);
+      expect(all.map((m) => m.id), equals(['a', 'b']));
+    });
+
+    test('getMessagesSince filters by timestamp and keeps the most recent limit', () async {
+      final store = JsonLinesMessageStore(path);
+      for (var i = 1; i <= 5; i++) {
+        await store.saveMessage(Message(id: 'm$i', data: '', at: i * 10));
+      }
+      expect((await store.getMessagesSince(20)).map((m) => m.id), equals(['m3', 'm4', 'm5']));
+      expect((await store.getMessagesSince(0, limit: 2)).map((m) => m.id), equals(['m4', 'm5']));
+    });
+
+    test('deleteBefore removes older messages', () async {
+      final store = JsonLinesMessageStore(path);
+      for (var i = 1; i <= 3; i++) {
+        await store.saveMessage(Message(id: 'm$i', data: '', at: i * 10));
+      }
+      await store.deleteBefore(20);
+      expect((await store.getMessagesSince(0)).map((m) => m.id), equals(['m2', 'm3']));
+    });
+
+    test('skips corrupt lines and reads files from the former persistPath format', () async {
+      File(path)
+        ..createSync(recursive: true)
+        ..writeAsStringSync('{"id":"x","data":"hi","at":5}\nnot-json\n\n');
+      final all = await JsonLinesMessageStore(path).getMessagesSince(0);
+      expect(all.single.data, equals('hi'));
     });
   });
 
@@ -352,7 +484,7 @@ void main() {
           capturedEntries = max;
           capturedHours = hours;
         },
-        memberlistSetPersistPath: bindings.memberlistSetPersistPath,
+        memberlistRestoreLog: bindings.memberlistRestoreLog,
         freeString: bindings.freeString,
       );
       final g = Gossiper.withBindings(b);
@@ -363,34 +495,74 @@ void main() {
     });
   });
 
-  group('mDNS', () {
-    test('startDiscovery succeeds', () async {
+  group('MdnsDiscovery', () {
+    test('start succeeds', () async {
       final g = Gossiper.withBindings(_fakeBindings());
-      await g.startDiscovery();
+      await g.startDiscovery([MdnsDiscovery()]);
       g.dispose();
     });
 
-    test('startDiscovery throws GossiperException on mDNS error', () async {
+    test('start throws GossiperException on mDNS error', () async {
       final g = Gossiper.withBindings(_fakeBindings(mdnsStartError: true));
-      await expectLater(g.startDiscovery(), throwsA(isA<GossiperException>()));
+      await expectLater(g.startDiscovery([MdnsDiscovery()]), throwsA(isA<GossiperException>()));
       g.dispose();
     });
 
-    test('discoverPeers returns addresses from fake', () {
+    test('start joins all discovered peers by default', () async {
+      final joins = <List<String>>[];
+      final g = Gossiper.withBindings(_fakeBindings(
+        discoveredPeers: ['192.168.1.5:7946', '192.168.1.6:7946'],
+        joinCalls: joins,
+      ));
+      await g.startDiscovery([MdnsDiscovery()]);
+      expect(joins, equals([['192.168.1.5:7946', '192.168.1.6:7946']]));
+      g.dispose();
+    });
+
+    test('start does not join when autoJoin is null', () async {
+      final joins = <List<String>>[];
+      final g = Gossiper.withBindings(_fakeBindings(
+        discoveredPeers: ['192.168.1.5:7946'],
+        joinCalls: joins,
+      ));
+      await g.startDiscovery([MdnsDiscovery(autoJoin: null)]);
+      expect(joins, isEmpty);
+      g.dispose();
+    });
+
+    test('start keeps advertising when joining discovered peers fails', () async {
+      final mdns = MdnsDiscovery();
+      final g = Gossiper.withBindings(_fakeBindings(
+        discoveredPeers: ['192.168.1.5:7946'],
+        joinResult: -1,
+      ));
+      await g.startDiscovery([mdns]);
+      expect(() => mdns.joinPeers(), throwsA(isA<GossiperException>()));
+      g.dispose();
+    });
+
+    test('discoverPeers returns addresses from fake', () async {
+      final mdns = MdnsDiscovery(autoJoin: null);
       final g = Gossiper.withBindings(_fakeBindings(
         discoveredPeers: ['192.168.1.5:7946', '192.168.1.6:7946'],
       ));
-      expect(g.discoverPeers(), equals(['192.168.1.5:7946', '192.168.1.6:7946']));
+      await g.startDiscovery([mdns]);
+      expect(mdns.discoverPeers(), equals(['192.168.1.5:7946', '192.168.1.6:7946']));
       g.dispose();
     });
 
-    test('discoverPeers returns empty list when no peers found', () {
-      final g = Gossiper.withBindings(_fakeBindings(discoveredPeers: []));
-      expect(g.discoverPeers(), isEmpty);
+    test('discoverPeers excludes this node', () async {
+      final mdns = MdnsDiscovery(autoJoin: null);
+      final g = Gossiper.withBindings(_fakeBindings(
+        localAddr: '192.168.1.10',
+        discoveredPeers: ['192.168.1.10:7946', '192.168.1.5:7946'],
+      ));
+      await g.startDiscovery([mdns]);
+      expect(mdns.discoverPeers(), equals(['192.168.1.5:7946']));
       g.dispose();
     });
 
-    test('discoverPeers returns empty list when native returns null', () {
+    test('discoverPeers returns empty list when native returns null', () async {
       final bindings = _fakeBindings();
       final nullBindings = GossiperBindings.fake(
         memberlistCreate: bindings.memberlistCreate,
@@ -407,26 +579,121 @@ void main() {
         memberlistBroadcast: bindings.memberlistBroadcast,
         memberlistPollMessages: bindings.memberlistPollMessages,
         memberlistSetReplayWindow: bindings.memberlistSetReplayWindow,
-        memberlistSetPersistPath: bindings.memberlistSetPersistPath,
+        memberlistRestoreLog: bindings.memberlistRestoreLog,
         freeString: bindings.freeString,
       );
+      final mdns = MdnsDiscovery();
       final g = Gossiper.withBindings(nullBindings);
-      expect(g.discoverPeers(), isEmpty);
+      await g.startDiscovery([mdns]);
+      expect(mdns.discoverPeers(), isEmpty);
       g.dispose();
     });
 
-    test('joinViaDiscovery calls join with discovered addresses', () {
+    test('joinPeers returns contacted count', () async {
+      final mdns = MdnsDiscovery(autoJoin: null);
       final g = Gossiper.withBindings(_fakeBindings(
         discoveredPeers: ['192.168.1.5:7946'],
         joinResult: 1,
       ));
-      expect(g.joinViaDiscovery(), equals(1));
+      await g.startDiscovery([mdns]);
+      expect(mdns.joinPeers(), equals(1));
       g.dispose();
     });
 
-    test('joinViaDiscovery returns 0 when no peers found', () {
+    test('joinPeers returns 0 when no peers found', () async {
+      final mdns = MdnsDiscovery();
       final g = Gossiper.withBindings(_fakeBindings(discoveredPeers: []));
-      expect(g.joinViaDiscovery(), equals(0));
+      await g.startDiscovery([mdns]);
+      expect(mdns.joinPeers(), equals(0));
+      g.dispose();
+    });
+
+    test('start joins only peers allowed by autoJoin', () async {
+      final joins = <List<String>>[];
+      final g = Gossiper.withBindings(_fakeBindings(
+        discoveredPeers: ['192.168.1.5:7946', '10.0.0.7:7946'],
+        joinCalls: joins,
+      ));
+      await g.startDiscovery([
+        MdnsDiscovery(autoJoin: (peer, ctx) => peer.startsWith('192.168.')),
+      ]);
+      expect(joins, equals([['192.168.1.5:7946']]));
+      g.dispose();
+    });
+
+    test('start supports async autoJoin rules', () async {
+      final joins = <List<String>>[];
+      final g = Gossiper.withBindings(_fakeBindings(
+        discoveredPeers: ['192.168.1.5:7946'],
+        joinCalls: joins,
+      ));
+      await g.startDiscovery([
+        MdnsDiscovery(autoJoin: (peer, ctx) async => false),
+      ]);
+      expect(joins, isEmpty);
+      g.dispose();
+    });
+
+    test('joinPeers ignores autoJoin', () async {
+      final joins = <List<String>>[];
+      final mdns = MdnsDiscovery(autoJoin: (peer, ctx) => false);
+      final g = Gossiper.withBindings(_fakeBindings(
+        discoveredPeers: ['192.168.1.5:7946'],
+        joinCalls: joins,
+      ));
+      await g.startDiscovery([mdns]);
+      mdns.joinPeers();
+      expect(joins, equals([['192.168.1.5:7946']]));
+      g.dispose();
+    });
+
+    test('discoverPeers throws when not started', () {
+      expect(() => MdnsDiscovery().discoverPeers(), throwsA(isA<GossiperException>()));
+    });
+  });
+
+  group('DiscoveryStrategy', () {
+    test('custom strategy receives context and can join', () async {
+      final s = _FakeStrategy(peersToJoin: ['10.0.0.9:7946']);
+      final g = Gossiper.withBindings(_fakeBindings(localAddr: '192.168.1.10'));
+      await g.startDiscovery([s]);
+      expect(s.started, isTrue);
+      expect(s.ctx!.selfAddr, equals('192.168.1.10:7946'));
+      expect(s.joinResult, equals(1));
+      g.dispose();
+      expect(s.stopped, isTrue);
+    });
+
+    test('multiple strategies run together and all stop', () async {
+      final a = _FakeStrategy();
+      final b = _FakeStrategy();
+      final g = Gossiper.withBindings(_fakeBindings());
+      await g.startDiscovery([a, b]);
+      expect(a.started && b.started, isTrue);
+      g.stopDiscovery();
+      expect(a.stopped && b.stopped, isTrue);
+      g.dispose();
+    });
+
+    test('failing strategy stops the ones already started and rethrows', () async {
+      final a = _FakeStrategy();
+      final g = Gossiper.withBindings(_fakeBindings(mdnsStartError: true));
+      await expectLater(
+        g.startDiscovery([a, MdnsDiscovery()]),
+        throwsA(isA<GossiperException>()),
+      );
+      expect(a.stopped, isTrue);
+      g.dispose();
+    });
+
+    test('startDiscovery again stops previous strategies', () async {
+      final a = _FakeStrategy();
+      final b = _FakeStrategy();
+      final g = Gossiper.withBindings(_fakeBindings());
+      await g.startDiscovery([a]);
+      await g.startDiscovery([b]);
+      expect(a.stopped, isTrue);
+      expect(b.stopped, isFalse);
       g.dispose();
     });
   });
@@ -505,78 +772,57 @@ void main() {
     });
   });
 
-  group('BeaconUtils.processBeacon', () {
-    test('calls onJoin with remote addr when beacon is valid', () {
-      String? joined;
-      BeaconUtils.processBeacon(
-        payload: '{"type":"test_hello","addr":"192.168.1.10:7946"}',
-        selfAddr: '192.168.1.1:7946',
-        beaconType: 'test_hello',
-        numMembers: 1,
-        onJoin: (addr) => joined = addr,
-      );
-      expect(joined, equals('192.168.1.10:7946'));
+  group('BeaconUtils.parseBeacon', () {
+    String? parse(String payload) => BeaconUtils.parseBeacon(
+          payload: payload,
+          selfAddr: '192.168.1.1:7946',
+          beaconType: 'test_hello',
+        );
+
+    test('returns remote addr when beacon is valid', () {
+      expect(parse('{"type":"test_hello","addr":"192.168.1.10:7946"}'), equals('192.168.1.10:7946'));
     });
 
     test('ignores beacon from self', () {
-      String? joined;
-      BeaconUtils.processBeacon(
-        payload: '{"type":"test_hello","addr":"192.168.1.1:7946"}',
-        selfAddr: '192.168.1.1:7946',
-        beaconType: 'test_hello',
-        numMembers: 1,
-        onJoin: (addr) => joined = addr,
-      );
-      expect(joined, isNull);
+      expect(parse('{"type":"test_hello","addr":"192.168.1.1:7946"}'), isNull);
     });
 
     test('ignores beacon with wrong type', () {
-      String? joined;
-      BeaconUtils.processBeacon(
-        payload: '{"type":"other_app","addr":"192.168.1.10:7946"}',
-        selfAddr: '192.168.1.1:7946',
-        beaconType: 'test_hello',
-        numMembers: 1,
-        onJoin: (addr) => joined = addr,
-      );
-      expect(joined, isNull);
-    });
-
-    test('does not join when already in a cluster (numMembers > 1)', () {
-      String? joined;
-      BeaconUtils.processBeacon(
-        payload: '{"type":"test_hello","addr":"192.168.1.10:7946"}',
-        selfAddr: '192.168.1.1:7946',
-        beaconType: 'test_hello',
-        numMembers: 3,
-        onJoin: (addr) => joined = addr,
-      );
-      expect(joined, isNull);
+      expect(parse('{"type":"other_app","addr":"192.168.1.10:7946"}'), isNull);
     });
 
     test('ignores malformed JSON without throwing', () {
-      expect(
-        () => BeaconUtils.processBeacon(
-          payload: 'not-json',
-          selfAddr: '192.168.1.1:7946',
-          beaconType: 'test_hello',
-          numMembers: 1,
-          onJoin: (_) {},
-        ),
-        returnsNormally,
-      );
+      expect(parse('not-json'), isNull);
     });
 
     test('ignores beacon missing addr field', () {
-      String? joined;
-      BeaconUtils.processBeacon(
-        payload: '{"type":"test_hello"}',
-        selfAddr: '192.168.1.1:7946',
-        beaconType: 'test_hello',
-        numMembers: 1,
-        onJoin: (addr) => joined = addr,
-      );
-      expect(joined, isNull);
+      expect(parse('{"type":"test_hello"}'), isNull);
+    });
+  });
+
+  group('AutoJoinRules', () {
+    test('always allows any peer', () async {
+      final s = _FakeStrategy();
+      final g = Gossiper.withBindings(_fakeBindings(members: _membersOf(3)));
+      await g.startDiscovery([s]);
+      expect(AutoJoinRules.always('192.168.1.5:7946', s.ctx!), isTrue);
+      g.dispose();
+    });
+
+    test('whenAlone allows while numMembers <= 1', () async {
+      final s = _FakeStrategy();
+      final g = Gossiper.withBindings(_fakeBindings());
+      await g.startDiscovery([s]);
+      expect(AutoJoinRules.whenAlone('192.168.1.5:7946', s.ctx!), isTrue);
+      g.dispose();
+    });
+
+    test('whenAlone refuses once already in a cluster', () async {
+      final s = _FakeStrategy();
+      final g = Gossiper.withBindings(_fakeBindings(members: _membersOf(3)));
+      await g.startDiscovery([s]);
+      expect(AutoJoinRules.whenAlone('192.168.1.5:7946', s.ctx!), isFalse);
+      g.dispose();
     });
   });
 
@@ -626,4 +872,50 @@ class _FakeNetworkInterface implements NetworkInterface {
 
   @override
   List<Never> get addresses => const [];
+}
+
+class _FakeStrategy implements DiscoveryStrategy {
+  final List<String> peersToJoin;
+  DiscoveryContext? ctx;
+  bool started = false;
+  bool stopped = false;
+  int? joinResult;
+
+  _FakeStrategy({this.peersToJoin = const []});
+
+  void Function()? onStart;
+
+  @override
+  Future<void> start(DiscoveryContext ctx) async {
+    onStart?.call();
+    this.ctx = ctx;
+    started = true;
+    if (peersToJoin.isNotEmpty) joinResult = ctx.join(peersToJoin);
+  }
+
+  @override
+  void stop() => stopped = true;
+}
+
+List<Map<String, dynamic>> _membersOf(int n) => [
+      for (var i = 0; i < n; i++) {'name': 'peer-$i', 'addr': '192.168.1.${20 + i}', 'port': 7946},
+    ];
+
+class _FakeMessageStore implements MessageStore {
+  final List<Message> messages;
+
+  _FakeMessageStore([List<Message> initial = const []]) : messages = [...initial];
+
+  @override
+  Future<void> saveMessage(Message message) async => messages.add(message);
+
+  @override
+  Future<List<Message>> getMessagesSince(int afterTimestamp, {int? limit}) async {
+    final found = messages.where((m) => m.at > afterTimestamp).toList()
+      ..sort((a, b) => a.at.compareTo(b.at));
+    return limit != null && found.length > limit ? found.sublist(found.length - limit) : found;
+  }
+
+  @override
+  Future<void> deleteBefore(int timestamp) async => messages.removeWhere((m) => m.at < timestamp);
 }

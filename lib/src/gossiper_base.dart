@@ -2,15 +2,20 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:ffi';
 import 'dart:io';
-import 'dart:typed_data';
 
 import 'package:ffi/ffi.dart';
+import 'package:gossiper/src/domain/contracts/discovery_strategy.dart';
+import 'package:gossiper/src/domain/contracts/message_store.dart';
+import 'package:gossiper/src/domain/entities/message.dart';
 import 'package:gossiper/src/domain/entities/member_node.dart';
 import 'package:gossiper/src/domain/entities/node_event.dart';
 import 'package:gossiper/src/domain/exceptions/gossiper_exception.dart';
 import 'package:gossiper/src/domain/vos/node_event_type.dart';
 
 import 'beacon_utils.dart';
+import 'discovery/beacon_discovery.dart';
+import 'discovery/mdns_discovery.dart';
+import 'discovery/native_discovery_context.dart';
 import 'gossiper_bindings.dart';
 
 // Reads an error C string from errPtr safely and frees it.
@@ -29,18 +34,25 @@ class Gossiper {
   Timer? _pollTimer;
   Timer? _messagesPollTimer;
   final _eventController = StreamController<NodeEvent>.broadcast();
-  final _messagesController = StreamController<String>.broadcast();
-  RawDatagramSocket? _beaconSocket;
-  Timer? _beaconTimer;
+  final _messagesController = StreamController<Message>.broadcast();
+  final _discoveries = <DiscoveryStrategy>[];
+  int _replayMaxEntries = 500;
+  Duration _replayWindow = const Duration(hours: 24);
+  MessageStore? _messageStore;
+  bool _historyLoaded = false;
 
   Gossiper._(this._bindings, this._handle);
 
   /// Creates a Gossiper from pre-built bindings — for use in unit tests only.
-  static Gossiper withBindings(GossiperBindings bindings, {int handle = 1}) =>
-      Gossiper._(bindings, handle);
+  static Gossiper withBindings(
+    GossiperBindings bindings, {
+    int handle = 1,
+    MessageStore? messageStore,
+  }) =>
+      Gossiper._(bindings, handle).._messageStore = messageStore;
 
-  static GossiperBindings _loadLib(String? libPath) {
-    final path = libPath ?? _defaultLibPath();
+  static GossiperBindings _loadLib() {
+    final path = _defaultLibPath();
     return GossiperBindings.fromLibrary(DynamicLibrary.open(path));
   }
 
@@ -81,17 +93,19 @@ class Gossiper {
   /// [name] is the unique node name (defaults to hostname if omitted).
   /// [bindAddr] is the address to bind to (default "0.0.0.0").
   /// [bindPort] is the gossip port (default 7946).
-  /// [libPath] overrides the shared-library search path.
+  ///
+  /// [messageStore], when given, saves every message sent or received, and
+  /// its history is loaded into the replay log on the first [startDiscovery]
+  /// so peers that come back can still receive it after a restart.
   static Gossiper create({
     String? name,
     String bindAddr = '0.0.0.0',
     int bindPort = 7946,
-    String? libPath,
     int replayMaxEntries = 500,
     Duration replayWindow = const Duration(hours: 24),
-    String? persistPath,
+    MessageStore? messageStore,
   }) {
-    final bindings = _loadLib(libPath);
+    final bindings = _loadLib();
 
     final namePtr = name != null ? name.toNativeUtf8() : nullptr;
     final addrPtr = bindAddr.toNativeUtf8();
@@ -111,7 +125,7 @@ class Gossiper {
 
       final g = Gossiper._(bindings, handle);
       g.setReplayWindow(maxEntries: replayMaxEntries, window: replayWindow);
-      if (persistPath != null) g.setPersistPath(persistPath);
+      g._messageStore = messageStore;
       return g;
     } finally {
       if (namePtr != nullptr) calloc.free(namePtr);
@@ -209,23 +223,6 @@ class Gossiper {
   // Replay window configuration
   // -------------------------------------------------------------------------
 
-  /// Configures durable message log storage.
-  ///
-  /// When set, every broadcast message is appended to [path] as a JSON line.
-  /// On startup the file is loaded before the node joins the cluster, so a
-  /// PDV that restarts recovers its message history automatically — even if
-  /// every other node was also restarted in the meantime.
-  ///
-  /// Pass an empty string to disable persistence.
-  void setPersistPath(String path) {
-    final pathPtr = path.toNativeUtf8();
-    try {
-      _bindings.memberlistSetPersistPath(_handle, pathPtr.cast());
-    } finally {
-      calloc.free(pathPtr);
-    }
-  }
-
   /// Configures the in-memory message replay log.
   ///
   /// When a node reconnects after being offline, memberlist automatically
@@ -236,7 +233,39 @@ class Gossiper {
     int maxEntries = 500,
     Duration window = const Duration(hours: 24),
   }) {
+    _replayMaxEntries = maxEntries;
+    _replayWindow = window;
     _bindings.memberlistSetReplayWindow(_handle, maxEntries, window.inHours);
+  }
+
+  // -------------------------------------------------------------------------
+  // Message persistence
+  // -------------------------------------------------------------------------
+
+  /// Loads the [MessageStore] history within the replay window into the
+  /// native replay log, after deleting older entries from the store.
+  ///
+  /// Restored messages are not delivered on [messages]; they are replayed to
+  /// peers and used to dedup what peers send back.
+  Future<void> _loadHistory() async {
+    final store = _messageStore;
+    if (store == null) return;
+    final cutoff = DateTime.now().subtract(_replayWindow).millisecondsSinceEpoch;
+    await store.deleteBefore(cutoff);
+    final history = await store.getMessagesSince(cutoff, limit: _replayMaxEntries);
+    if (history.isEmpty) return;
+
+    final json = jsonEncode(history.map((m) => m.toJson()).toList()).toNativeUtf8();
+    final errPtr = calloc<Pointer<Utf8>>();
+    try {
+      final result = _bindings.memberlistRestoreLog(_handle, json.cast(), errPtr.cast());
+      if (result < 0) {
+        throw GossiperException('Restore log failed: ${_readErr(_bindings, errPtr)}');
+      }
+    } finally {
+      calloc.free(json);
+      calloc.free(errPtr);
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -248,25 +277,36 @@ class Gossiper {
   /// The message is propagated via memberlist's gossip broadcast mechanism.
   /// Delivery is best-effort and eventual — not guaranteed or ordered.
   /// [data] is opaque: use any encoding (JSON, plain text, Protobuf, etc.).
-  void broadcast(String data) {
+  ///
+  /// Returns the sent [Message], with the [Message.id] and [Message.at]
+  /// peers will receive. It is also saved to the [MessageStore], if any.
+  /// Delivery failures are not retried — keep your own outbox if you need that.
+  Message broadcast(String data) {
     final dataPtr = data.toNativeUtf8();
     final errPtr = calloc<Pointer<Utf8>>();
     try {
-      final result = _bindings.memberlistBroadcast(_handle, dataPtr.cast(), errPtr.cast());
-      if (result < 0) {
+      final ptr = _bindings.memberlistBroadcast(_handle, dataPtr.cast(), errPtr.cast());
+      if (ptr == nullptr) {
         throw GossiperException('Broadcast failed: ${_readErr(_bindings, errPtr)}');
       }
+      final json = ptr.cast<Utf8>().toDartString();
+      _bindings.freeString(ptr.cast());
+      final message = Message.fromJson(jsonDecode(json) as Map<String, dynamic>);
+      _messageStore?.saveMessage(message);
+      return message;
     } finally {
       calloc.free(dataPtr);
       calloc.free(errPtr);
     }
   }
 
-  /// Stream of messages received from other cluster nodes.
+  /// Stream of [Message]s received from other cluster nodes, including
+  /// messages missed while offline and replayed on reconnect.
   ///
-  /// Messages are raw strings exactly as sent by [broadcast] on the remote node.
+  /// [Message.data] is exactly what [broadcast] was given on the remote node.
+  /// Each message is also saved to the [MessageStore], if any.
   /// Each call resets the poll interval to [pollInterval].
-  Stream<String> messages({Duration pollInterval = const Duration(milliseconds: 500)}) {
+  Stream<Message> messages({Duration pollInterval = const Duration(milliseconds: 500)}) {
     _messagesPollTimer?.cancel();
     _messagesPollTimer = Timer.periodic(pollInterval, (_) => _pollMessages());
     return _messagesController.stream;
@@ -279,94 +319,46 @@ class Gossiper {
 
     final decoded = jsonDecode(json);
     if (decoded is! List) return;
-    for (final msg in decoded) {
-      _messagesController.add(msg as String);
+    for (final item in decoded) {
+      final message = Message.fromJson(item as Map<String, dynamic>);
+      _messageStore?.saveMessage(message);
+      _messagesController.add(message);
     }
   }
 
   // -------------------------------------------------------------------------
-  // Discovery (mDNS + beacon)
+  // Discovery (pluggable strategies)
   // -------------------------------------------------------------------------
 
-  /// Starts all discovery mechanisms for this node:
+  /// Starts every strategy in [strategies] concurrently on this node.
   ///
-  /// 1. mDNS advertisement — responds to queries from peers calling [discoverPeers].
-  /// 2. UDP beacon — broadcasts this node's address on the LAN every [beaconInterval]
-  ///    and automatically calls [join] when it hears another node's beacon.
+  /// Defaults to `[MdnsDiscovery(), BeaconDiscovery()]`. Pass your own
+  /// [DiscoveryStrategy] implementations — alone or mixed with the built-in
+  /// ones — to discover peers some other way.
   ///
-  /// Both mechanisms run concurrently in the background. The node joins the
-  /// cluster as soon as any peer is found — no additional calls needed.
-  /// Call [stopDiscovery] or [dispose] to stop both.
+  /// On the first call, the [MessageStore] history (if any) is loaded into the
+  /// replay log before any strategy starts, so this node knows what it already
+  /// has before talking to peers.
   ///
-  /// [beaconType] scopes the beacon to a logical cluster — nodes with
-  /// different types on the same network will not discover each other.
-  Future<void> startDiscovery({
-    String serviceName = '_gossiper._tcp',
-    int beaconPort = 7947,
-    Duration beaconInterval = const Duration(seconds: 5),
-    String beaconType = 'gossiper_hello',
-  }) async {
-    // 1. mDNS advertisement
-    final svcPtr = serviceName.toNativeUtf8();
-    final errPtr = calloc<Pointer<Utf8>>();
-    try {
-      final result = _bindings.memberlistStartMDNS(_handle, svcPtr.cast(), errPtr.cast());
-      if (result < 0) {
-        throw GossiperException('mDNS start failed: ${_readErr(_bindings, errPtr)}');
+  /// Any strategies already running are stopped first. If a strategy throws,
+  /// the ones already started are stopped and the error is rethrown.
+  /// Call [stopDiscovery] or [dispose] to stop them all.
+  Future<void> startDiscovery([List<DiscoveryStrategy>? strategies]) async {
+    stopDiscovery();
+    if (!_historyLoaded) {
+      await _loadHistory();
+      _historyLoaded = true;
+    }
+    final ctx = _GossiperDiscoveryContext(this, await _resolveLanIp(), localNode().port);
+    for (final strategy in strategies ?? [MdnsDiscovery(), BeaconDiscovery()]) {
+      _discoveries.add(strategy);
+      try {
+        await strategy.start(ctx);
+      } catch (_) {
+        stopDiscovery();
+        rethrow;
       }
-    } finally {
-      calloc.free(svcPtr);
-      calloc.free(errPtr);
     }
-
-    // 2. Beacon — non-fatal if UDP is unavailable
-    final lanIp = await _resolveLanIp();
-    final gossipPort = localNode().port;
-    final selfAddr = '$lanIp:$gossipPort';
-
-    _stopBeacon();
-    try {
-      _beaconSocket = await RawDatagramSocket.bind(InternetAddress.anyIPv4, beaconPort);
-      _beaconSocket!.broadcastEnabled = true;
-      _beaconSocket!.listen((event) {
-        if (event != RawSocketEvent.read) return;
-        final dg = _beaconSocket?.receive();
-        if (dg == null) return;
-        _handleBeacon(
-          utf8.decode(dg.data, allowMalformed: true),
-          selfAddr,
-          beaconType,
-        );
-      });
-
-      _sendBeacon(lanIp, gossipPort, beaconPort, beaconType);
-      _beaconTimer = Timer.periodic(beaconInterval, (_) {
-        _sendBeacon(lanIp, gossipPort, beaconPort, beaconType);
-      });
-    } catch (_) {
-      // beacon failure is non-fatal — mDNS still works
-    }
-  }
-
-  void _sendBeacon(String lanIp, int gossipPort, int beaconPort, String beaconType) {
-    final socket = _beaconSocket;
-    if (socket == null) return;
-    final payload = Uint8List.fromList(
-      utf8.encode(jsonEncode({'type': beaconType, 'addr': '$lanIp:$gossipPort'})),
-    );
-    try {
-      socket.send(payload, InternetAddress(BeaconUtils.subnetBroadcast(lanIp)), beaconPort);
-    } catch (_) {}
-  }
-
-  void _handleBeacon(String payload, String selfAddr, String beaconType) {
-    BeaconUtils.processBeacon(
-      payload: payload,
-      selfAddr: selfAddr,
-      beaconType: beaconType,
-      numMembers: numMembers(),
-      onJoin: (addr) => join([addr]),
-    );
   }
 
   Future<String> _resolveLanIp() async {
@@ -375,60 +367,19 @@ class Gossiper {
     return Gossiper.resolveLanIp();
   }
 
-  void _stopBeacon() {
-    _beaconTimer?.cancel();
-    _beaconTimer = null;
-    _beaconSocket?.close();
-    _beaconSocket = null;
-  }
-
-  /// Stops mDNS advertisement and beacon broadcasting for this node.
+  /// Stops every strategy started by [startDiscovery].
   void stopDiscovery() {
-    _stopBeacon();
-    _bindings.memberlistStopMDNS(_handle);
-  }
-
-  /// Queries the local network for nodes advertising [serviceName] via mDNS.
-  ///
-  /// Returns a list of `"addr:port"` strings that can be passed directly to
-  /// [join]. Blocks for up to [timeout] waiting for responses.
-  ///
-  /// This is a synchronous call — run it in an isolate or wrap with
-  /// [Future] if you need non-blocking behaviour.
-  List<String> discoverPeers({
-    String serviceName = '_gossiper._tcp',
-    Duration timeout = const Duration(seconds: 2),
-  }) {
-    final svcPtr = serviceName.toNativeUtf8();
-    try {
-      final ptr = _bindings.memberlistDiscoverMDNS(svcPtr.cast(), timeout.inMilliseconds);
-      final json = ptr.cast<Utf8>().toDartString();
-      _bindings.freeString(ptr.cast());
-      final decoded = jsonDecode(json);
-      return decoded is List ? decoded.cast<String>() : [];
-    } finally {
-      calloc.free(svcPtr);
+    for (final strategy in _discoveries) {
+      strategy.stop();
     }
-  }
-
-  /// Convenience method: discovers peers via mDNS and immediately joins them.
-  ///
-  /// Returns the number of seed nodes successfully contacted.
-  /// Returns 0 if no peers were found (this node will wait for others to join it).
-  int joinViaDiscovery({
-    String serviceName = '_gossiper._tcp',
-    Duration discoveryTimeout = const Duration(seconds: 2),
-  }) {
-    final peers = discoverPeers(serviceName: serviceName, timeout: discoveryTimeout);
-    if (peers.isEmpty) return 0;
-    return join(peers);
+    _discoveries.clear();
   }
 
   // -------------------------------------------------------------------------
   // Lifecycle
   // -------------------------------------------------------------------------
 
-  /// Stops polling, discovery (mDNS + beacon), and shuts down the node.
+  /// Stops polling, all discovery strategies, and shuts down the node.
   void dispose() {
     _pollTimer?.cancel();
     _messagesPollTimer?.cancel();
@@ -439,3 +390,30 @@ class Gossiper {
   }
 }
 
+
+class _GossiperDiscoveryContext implements NativeDiscoveryContext {
+  final Gossiper _gossiper;
+
+  @override
+  final String lanIp;
+
+  @override
+  final int gossipPort;
+
+  _GossiperDiscoveryContext(this._gossiper, this.lanIp, this.gossipPort);
+
+  @override
+  String get selfAddr => '$lanIp:$gossipPort';
+
+  @override
+  int get numMembers => _gossiper.numMembers();
+
+  @override
+  int join(List<String> addresses) => _gossiper.join(addresses);
+
+  @override
+  GossiperBindings get bindings => _gossiper._bindings;
+
+  @override
+  int get handle => _gossiper._handle;
+}

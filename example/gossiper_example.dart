@@ -8,6 +8,8 @@ void main(List<String> args) async {
     name: 'node-$pid',
     bindAddr: '0.0.0.0',
     bindPort: 7946,
+    // Saves every message; history is loaded back on startDiscovery
+    messageStore: JsonLinesMessageStore('gossiper-$pid.log'),
   );
 
   stdout.writeln('Local node: ${node.localNode()}');
@@ -19,27 +21,25 @@ void main(List<String> args) async {
 
   // Broadcast messages received from peers
   node.messages().listen((msg) {
-    stdout.writeln('[msg]   $msg');
+    stdout.writeln('[msg]   ${msg.data}  (id=${msg.id})');
   });
 
-  // Advertise on LAN so other nodes can discover this one
-  node.startDiscovery(serviceName: '_gossiper._tcp');
-  stdout.writeln('mDNS advertisement started.');
+  // Advertise on LAN and join any peers found. With explicit seeds, mDNS
+  // only advertises so the lookup doesn't delay the join below.
+  final mdns = MdnsDiscovery(
+    serviceName: '_gossiper._tcp',
+    autoJoin: explicitSeeds.isEmpty ? AutoJoinRules.always : null,
+  );
+  await node.startDiscovery([mdns, BeaconDiscovery()]);
+  stdout.writeln('Discovery started (mDNS + beacon).');
 
   if (explicitSeeds.isNotEmpty) {
     final n = node.join(explicitSeeds);
     stdout.writeln('Joined via explicit seeds — contacted $n node(s).');
+  } else if (node.numMembers() > 1) {
+    stdout.writeln('Joined cluster via mDNS — ${node.numMembers()} member(s).');
   } else {
-    stdout.writeln('Scanning for peers via mDNS (2 s)…');
-    final contacted = node.joinViaDiscovery(
-      serviceName: '_gossiper._tcp',
-      discoveryTimeout: const Duration(seconds: 2),
-    );
-    if (contacted > 0) {
-      stdout.writeln('Joined cluster via mDNS — contacted $contacted node(s).');
-    } else {
-      stdout.writeln('No peers found — running as bootstrap node.');
-    }
+    stdout.writeln('No peers found yet — running as bootstrap node (beacon keeps listening).');
   }
 
   // Broadcast a message to every peer in the cluster

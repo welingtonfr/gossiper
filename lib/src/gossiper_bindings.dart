@@ -87,12 +87,12 @@ typedef MemberlistDiscoverMDNSDart = Pointer<Utf8> Function(
 // Native function typedefs — broadcast messaging
 // ---------------------------------------------------------------------------
 
-typedef _MemberlistBroadcastNative = Int32 Function(
+typedef _MemberlistBroadcastNative = Pointer<Utf8> Function(
   Int64 handle,
   Pointer<Utf8> data,
   Pointer<Pointer<Utf8>> errOut,
 );
-typedef MemberlistBroadcastDart = int Function(
+typedef MemberlistBroadcastDart = Pointer<Utf8> Function(
   int handle,
   Pointer<Utf8> data,
   Pointer<Pointer<Utf8>> errOut,
@@ -112,14 +112,17 @@ typedef MemberlistSetReplayWindowDart = void Function(
   int windowHours,
 );
 
-typedef _MemberlistSetPersistPathNative = Void Function(
+typedef _MemberlistRestoreLogNative = Int32 Function(
   Int64 handle,
-  Pointer<Utf8> path,
+  Pointer<Utf8> entriesJson,
+  Pointer<Pointer<Utf8>> errOut,
 );
-typedef MemberlistSetPersistPathDart = void Function(
+typedef MemberlistRestoreLogDart = int Function(
   int handle,
-  Pointer<Utf8> path,
+  Pointer<Utf8> entriesJson,
+  Pointer<Pointer<Utf8>> errOut,
 );
+
 
 // ---------------------------------------------------------------------------
 // FreeString
@@ -147,7 +150,7 @@ class GossiperBindings {
   final MemberlistBroadcastDart memberlistBroadcast;
   final MemberlistPollMessagesDart memberlistPollMessages;
   final MemberlistSetReplayWindowDart memberlistSetReplayWindow;
-  final MemberlistSetPersistPathDart memberlistSetPersistPath;
+  final MemberlistRestoreLogDart memberlistRestoreLog;
   final FreeStringDart freeString;
 
   GossiperBindings._({
@@ -165,7 +168,7 @@ class GossiperBindings {
     required this.memberlistBroadcast,
     required this.memberlistPollMessages,
     required this.memberlistSetReplayWindow,
-    required this.memberlistSetPersistPath,
+    required this.memberlistRestoreLog,
     required this.freeString,
   });
 
@@ -204,8 +207,8 @@ class GossiperBindings {
       memberlistSetReplayWindow: lib
           .lookup<NativeFunction<_MemberlistSetReplayWindowNative>>('MemberlistSetReplayWindow')
           .asFunction(),
-      memberlistSetPersistPath: lib
-          .lookup<NativeFunction<_MemberlistSetPersistPathNative>>('MemberlistSetPersistPath')
+      memberlistRestoreLog: lib
+          .lookup<NativeFunction<_MemberlistRestoreLogNative>>('MemberlistRestoreLog')
           .asFunction(),
       freeString: lib.lookup<NativeFunction<_FreeStringNative>>('FreeString').asFunction(),
     );
@@ -227,7 +230,7 @@ class GossiperBindings {
     required MemberlistBroadcastDart memberlistBroadcast,
     required MemberlistPollMessagesDart memberlistPollMessages,
     required MemberlistSetReplayWindowDart memberlistSetReplayWindow,
-    required MemberlistSetPersistPathDart memberlistSetPersistPath,
+    required MemberlistRestoreLogDart memberlistRestoreLog,
     required FreeStringDart freeString,
   }) =>
       GossiperBindings._(
@@ -245,7 +248,7 @@ class GossiperBindings {
         memberlistBroadcast: memberlistBroadcast,
         memberlistPollMessages: memberlistPollMessages,
         memberlistSetReplayWindow: memberlistSetReplayWindow,
-        memberlistSetPersistPath: memberlistSetPersistPath,
+        memberlistRestoreLog: memberlistRestoreLog,
         freeString: freeString,
       );
 }

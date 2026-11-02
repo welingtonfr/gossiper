@@ -37,28 +37,23 @@ abstract final class BeaconUtils {
     return false;
   }
 
-  /// Parses a raw beacon [payload] and calls [onJoin] with the remote address
-  /// when a valid foreign beacon is received.
+  /// Parses a raw beacon [payload] and returns the remote `"addr:port"`.
   ///
-  /// Ignores payloads with wrong [beaconType], malformed JSON, and beacons
-  /// that originate from [selfAddr].
-  static void processBeacon({
+  /// Returns `null` for payloads with wrong [beaconType], malformed JSON,
+  /// a missing address, and beacons that originate from [selfAddr].
+  static String? parseBeacon({
     required String payload,
     required String selfAddr,
     required String beaconType,
-    required int numMembers,
-    required void Function(String addr) onJoin,
   }) {
-    String? addrToJoin;
     try {
       final map = jsonDecode(payload) as Map<String, dynamic>;
-      if (map['type'] != beaconType) return;
+      if (map['type'] != beaconType) return null;
       final remoteAddr = map['addr'] as String?;
-      if (remoteAddr == null || remoteAddr == selfAddr) return;
-      if (numMembers <= 1) addrToJoin = remoteAddr;
+      if (remoteAddr == null || remoteAddr == selfAddr) return null;
+      return remoteAddr;
     } catch (_) {
-      return;
+      return null;
     }
-    if (addrToJoin != null) onJoin(addrToJoin);
   }
 }
