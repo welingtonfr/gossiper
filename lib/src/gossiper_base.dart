@@ -243,7 +243,7 @@ class Gossiper {
   // -------------------------------------------------------------------------
 
   /// Loads the [MessageStore] history within the replay window into the
-  /// native replay log, after deleting older entries from the store.
+  /// native replay log. Never deletes from the store.
   ///
   /// Restored messages are not delivered on [messages]; they are replayed to
   /// peers and used to dedup what peers send back.
@@ -251,7 +251,6 @@ class Gossiper {
     final store = _messageStore;
     if (store == null) return;
     final cutoff = DateTime.now().subtract(_replayWindow).millisecondsSinceEpoch;
-    await store.deleteBefore(cutoff);
     final history = await store.getMessagesSince(cutoff, limit: _replayMaxEntries);
     if (history.isEmpty) return;
 

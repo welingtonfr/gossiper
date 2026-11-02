@@ -209,14 +209,13 @@ Persistence flow (Dart, `gossiper_base.dart`) — zero conf, no public calls:
 ```
 broadcast(data)          → MemberlistBroadcast returns {id,data,at} → store.saveMessage (not awaited)
 _pollMessages()          → each Message → store.saveMessage + messages() stream
-1st startDiscovery()     → _loadHistory(): store.deleteBefore(cutoff)
-                           + store.getMessagesSince(cutoff, limit: replayMaxEntries)
+1st startDiscovery()     → _loadHistory(): store.getMessagesSince(cutoff, limit: replayMaxEntries)
                            → MemberlistRestoreLog (seeded entries are not delivered; they are
                              replayed to peers via LocalState and dedup MergeRemoteState)
 ```
 
-`cutoff = now - replayWindow`. Retrying failed sends (outbox) is the client's job,
-not the library's. `join()` alone does not load the history.
+`cutoff = now - replayWindow`. The library never deletes from the store — retention
+is the client's call. Retrying failed sends (outbox) is also the client's job. `join()` alone does not load the history.
 
 
 ---

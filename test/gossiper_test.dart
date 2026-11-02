@@ -344,7 +344,7 @@ void main() {
       await g.startDiscovery(noDiscovery);
       final ids = (jsonDecode(restored.single) as List).map((e) => e['id']).toList();
       expect(ids, equals(['new']));
-      expect(store.messages.map((m) => m.id), equals(['new']), reason: 'old one pruned');
+      expect(store.messages, hasLength(2), reason: 'library never deletes from the store');
       g.dispose();
     });
 
@@ -443,6 +443,34 @@ void main() {
       }
       await store.deleteBefore(20);
       expect((await store.getMessagesSince(0)).map((m) => m.id), equals(['m2', 'm3']));
+    });
+
+    test('maxFileSizeBytes keeps the file within the limit, dropping the oldest', () async {
+      // each line is {"id":"mNN","data":"xxxxxxxxxx","at":NN}\n ≈ 40 bytes
+      final store = JsonLinesMessageStore(path, maxFileSizeBytes: 400);
+      for (var i = 10; i < 60; i++) {
+        await store.saveMessage(Message(id: 'm$i', data: 'xxxxxxxxxx', at: i));
+      }
+      expect(File(path).lengthSync(), lessThanOrEqualTo(400));
+      final ids = (await store.getMessagesSince(0)).map((m) => m.id).toList();
+      expect(ids.last, equals('m59'), reason: 'newest kept');
+      expect(ids, isNot(contains('m10')), reason: 'oldest dropped');
+      expect(ids, equals([...ids]..sort()), reason: 'still in order');
+    });
+
+    test('maxFileSizeBytes keeps the newest message even if it alone is too big', () async {
+      final store = JsonLinesMessageStore(path, maxFileSizeBytes: 10);
+      await store.saveMessage(const Message(id: 'a', data: 'way more than ten bytes', at: 1));
+      await store.saveMessage(const Message(id: 'b', data: 'also more than ten bytes', at: 2));
+      expect((await store.getMessagesSince(0)).map((m) => m.id), equals(['b']));
+    });
+
+    test('without maxFileSizeBytes the file is never trimmed', () async {
+      final store = JsonLinesMessageStore(path);
+      for (var i = 0; i < 50; i++) {
+        await store.saveMessage(Message(id: 'm$i', data: 'xxxxxxxxxx', at: i));
+      }
+      expect(await store.getMessagesSince(-1), hasLength(50));
     });
 
     test('skips corrupt lines and reads files from the former persistPath format', () async {
@@ -916,6 +944,4 @@ class _FakeMessageStore implements MessageStore {
     return limit != null && found.length > limit ? found.sublist(found.length - limit) : found;
   }
 
-  @override
-  Future<void> deleteBefore(int timestamp) async => messages.removeWhere((m) => m.at < timestamp);
 }

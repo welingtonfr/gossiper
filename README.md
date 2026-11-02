@@ -248,7 +248,7 @@ await node.startDiscovery();
 |---|---|
 | `broadcast(data)` | the sent `Message` is saved via `saveMessage` |
 | message arrives on `messages()` (live or replayed) | it is saved via `saveMessage` |
-| first `startDiscovery()` | `deleteBefore(now - replayWindow)`, then `getMessagesSince(now - replayWindow, limit: replayMaxEntries)` is loaded into the replay log — before any strategy starts |
+| first `startDiscovery()` | `getMessagesSince(now - replayWindow, limit: replayMaxEntries)` is loaded into the replay log — before any strategy starts |
 
 Loading the history before joining matters twice: the node can replay it to
 peers that come back, and it won't receive those messages again from peers.
@@ -257,17 +257,24 @@ The Go side never touches the filesystem — it only gets what the store returns
 Out of scope, on purpose:
 - **Retrying failed sends** — `broadcast` is fire-and-forget; keep your own outbox if you need guaranteed delivery.
 - **Nodes joined only with `join()`** (no `startDiscovery()`) don't load the history.
+- **Retention** — the library never deletes from the store; how much to keep and when to delete is your call (`JsonLinesMessageStore` has `maxFileSizeBytes` and `deleteBefore(timestamp)` if you want them).
 - **Store errors** thrown by `saveMessage` are not caught.
 
 `JsonLinesMessageStore` writes one `{"id","data","at"}` object per line,
-serializes concurrent operations, and skips corrupt lines. To store messages
+serializes concurrent operations, skips corrupt lines, and offers
+`deleteBefore(timestamp)` for your own cleanup. To cap the file size:
+
+```dart
+// when a save makes the file exceed 5 MB, it is rewritten keeping only the
+// newest messages that fit in 75% of the limit (no limit by default)
+JsonLinesMessageStore('/data/gossiper.log', maxFileSizeBytes: 5 * 1024 * 1024);
+``` To store messages
 elsewhere (SQLite, Hive, a remote service…), implement `MessageStore`:
 
 ```dart
 abstract interface class MessageStore {
   Future<void> saveMessage(Message message);
   Future<List<Message>> getMessagesSince(int afterTimestamp, {int? limit}); // oldest first; limit = most recent N
-  Future<void> deleteBefore(int timestamp);
 }
 ```
 
